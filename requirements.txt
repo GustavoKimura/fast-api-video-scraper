@@ -1,0 +1,15 @@
+aiohttp
+beautifulsoup4
+bs4
+deep_translator
+fastapi
+fake_useragent
+langdetect
+nltk
+numpy
+readability-lxml
+sentence-transformers
+tldextract
+trafilatura
+transformers
+uvicorn[standard]
