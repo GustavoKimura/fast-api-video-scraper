@@ -9,7 +9,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 COPY . .
 
-RUN python download_nltk.py
+RUN python - <<EOF
+import nltk
+nltk.download("punkt", quiet=True)
+EOF
 
 ENV PORT 8080
 
