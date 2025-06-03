@@ -566,10 +566,15 @@ def index():
         border-radius: 4px;
         margin-top: 16px;
         text-align: justify;
+        word-break: break-word;
+        overflow-wrap: break-word;
+        max-width: 100%;
+        box-sizing: border-box;
       }
       #o a {
         color: #5ab4f0;
         text-decoration: none;
+        word-break: break-word;
       }
       #o a:hover {
         color: #82cfff;
@@ -604,8 +609,8 @@ def index():
         let data = await result.json();
         o.innerHTML = data.map((item, idx) => `
           <div style="margin-bottom:20px; border-bottom:1px solid #eee; padding-bottom:12px;">
-          <strong>${idx + 1}. ${item.title}</strong><br>
-          <div style="margin:8px 0;">${item.summary.replace(/\\n/g,'<br>')}</div>
+            <strong>${idx + 1}. ${item.title}</strong><br>
+            <div style="margin:8px 0;">${item.summary.split('\\n').map(p => `<p style="margin: 0 0 10px 0;">${p}</p>`).join('')}</div>
             <div>Links:<br>
               ${item.links.map(link => `<a href="${link}" target="_blank">${link}</a>`).join('<br>')}
             </div>
