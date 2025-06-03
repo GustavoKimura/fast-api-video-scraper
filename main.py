@@ -542,7 +542,7 @@ def index():
         width: 100%;
         margin: 0 auto 16px auto;
       }
-      input[type="text"], input[type="search"] {
+      input {
         font-size: 16px;
         padding: 8px;
         width: 100%;
@@ -553,36 +553,25 @@ def index():
         display: flex;
         align-items: center;
         gap: 6px;
-        color: red;
+        color: white;
       }
       button {
         font-size: 16px;
         padding: 8px;
       }
-      pre {
-        white-space: pre-wrap;
-        word-break: break-all;
-        width: 100%;
-        max-width: 100vw;
-        box-sizing: border-box;
-        background: #f5f5f5;
-        padding: 8px;
-        border-radius: 4px;
-        font-size: 13px;
-        overflow-x: auto;
-      }
-      #out {
+      #o {
         background: #1a1a1a;
         color: #e0e0e0;
         padding: 12px;
         border-radius: 4px;
         margin-top: 16px;
+        text-align: justify;
       }
-      #out a {
+      #o a {
         color: #5ab4f0;
         text-decoration: none;
       }
-      #out a:hover {
+      #o a:hover {
         color: #82cfff;
         text-decoration: underline;
       }
@@ -590,29 +579,35 @@ def index():
   </head>
   <body>
     <form id="f">
-      <input id="q" placeholder="Qualquer besteira aqui..." required>
-      <label><input type="checkbox" id="ps">Usar Power Scraping? 💀</label>
-      <button>OK</button>
+      <label for="q">Busca:</label>
+      <input id="q" type="text" placeholder="Qualquer besteira aqui..." required>
+      <label for="l">Quantidade de links a processar (Ex. 10):</label>
+      <input id="l" type="number" placeholder="Ex. 10" value="10" min="1" required>
+      <label for="s">Quantidade de resumos desejados (Ex. 5):</label>
+      <input id="s" type="number" placeholder="Ex. 5" value="5" min="1" required>
+      <button>Buscar</button>
     </form>
-    <div id="out"></div>
+    <div id="o">Os resultados da busca aparecerão aqui.</div>
     <script>
       const f = document.getElementById('f');
       const q = document.getElementById('q');
-      const ps = document.getElementById('ps');
-      const out = document.getElementById('out');
-
+      const l = document.getElementById('l');
+      const s = document.getElementById('s');
+      const o = document.getElementById('o');
       f.onsubmit = async e => {
         e.preventDefault();
-        out.textContent = '...';
-        let qv = encodeURIComponent(q.value);
-        let power = ps.checked ? '1' : '0';
-        let r = await fetch(`/search?query=${qv}&power_scraping=${power}`);
-        out.innerHTML = (await r.json()).map((item, idx) => `
+        o.textContent = 'Carregando...';
+        let query = encodeURIComponent(q.value);
+        let linksToScrap = parseInt(l.value);
+        let summaries = parseInt(s.value);
+        let result = await fetch(`/search?query=${query}&links_to_scrap=${linksToScrap}&summaries=${summaries}`);
+        let data = await result.json();
+        o.innerHTML = data.map((item, idx) => `
           <div style="margin-bottom:20px; border-bottom:1px solid #eee; padding-bottom:12px;">
-            <strong>${idx + 1}. ${item.title}</strong><br>
-            <div style="margin:8px 0;">${item.summary.replace(/\\n/g,'<br>')}</div>
+          <strong>${idx + 1}. ${item.title}</strong><br>
+          <div style="margin:8px 0;">${item.summary.replace(/\\n/g,'<br>')}</div>
             <div>Links:<br>
-              ${item.links.map(l => `<a href="${l}" target="_blank">${l}</a>`).join('<br>')}
+              ${item.links.map(link => `<a href="${link}" target="_blank">${link}</a>`).join('<br>')}
             </div>
           </div>
         `).join('');
@@ -624,8 +619,9 @@ def index():
 
 
 @app.get("/search")
-async def search(query: str, power_scraping: bool):
-    links_to_scrap, summaries = (500, 100) if power_scraping else (20, 10)
+async def search(
+    query: str = "Search something...", links_to_scrap: int = 10, summaries: int = 5
+):
     clean_expired_cache()
     results = await advanced_search_async(query, links_to_scrap, summaries)
     minimal_results = [
