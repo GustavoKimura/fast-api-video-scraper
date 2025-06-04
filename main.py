@@ -332,14 +332,13 @@ def extract_relevant_links_from_html(html, base_url, query_embed):
         if isinstance(a, Tag):
             href = a.get("href")
             text = a.get_text(strip=True)
-            if isinstance(href, str):
-                url = urljoin(base_url, href)
-                if is_valid_link(url) and url not in seen and text:
-                    seen.add(url)
-                    sim = cosine_similarity(
-                        query_embed, model_embed.encode([f"passage: {text}"])[0]
-                    )
-                    links_with_scores.append((sim, url))
+            url = urljoin(base_url, str(href))
+            if is_valid_link(url) and url not in seen and text:
+                seen.add(url)
+                sim = cosine_similarity(
+                    query_embed, model_embed.encode([f"passage: {text}"])[0]
+                )
+                links_with_scores.append((sim, url))
 
     if links_with_scores:
         threshold = np.percentile([s for s, _ in links_with_scores], 75)
@@ -347,6 +346,45 @@ def extract_relevant_links_from_html(html, base_url, query_embed):
             url for sim, url in links_with_scores if sim >= max(float(threshold), 0.35)
         ][:5]
     return []
+
+
+def extract_video_links_from_html(html, base_url, query_embed):
+    soup = BeautifulSoup(html, "lxml")
+    seen = set()
+    links_with_scores = []
+
+    for tag in soup.find_all(["a", "video", "source"], href=True) + soup.find_all(
+        "a", src=True
+    ):
+        if not isinstance(tag, Tag):
+            continue
+        href = tag.get("href") or tag.get("src")
+        text = tag.get("title") or tag.get("alt") or tag.get_text(strip=True)
+
+        if href:
+            url = urljoin(base_url, str(href))
+            if not is_valid_link(url) or url in seen:
+                continue
+            seen.add(url)
+
+            is_video = any(
+                x in url.lower() for x in ["/video", "/watch", "/view", ".mp4", ".m3u8"]
+            )
+            score = 0.0
+
+            if text:
+                score = cosine_similarity(
+                    query_embed, model_embed.encode([f"passage: {text}"])[0]
+                )
+                if is_video:
+                    score += 0.3
+            elif is_video:
+                score = 0.4
+
+            if score > 0.3:
+                links_with_scores.append((score, url))
+    links_with_scores.sort(reverse=True)
+    return [url for _, url in links_with_scores[:5]]
 
 
 async def process_url_async(url, session, query_embed):
@@ -393,7 +431,8 @@ async def process_url_async(url, session, query_embed):
     result = {
         "url": url,
         "summary": text.strip(),
-        "relevant_links": extract_relevant_links_from_html(html, url, query_embed),
+        "summary_links": extract_relevant_links_from_html(html, url, query_embed),
+        "video_links": extract_video_links_from_html(html, url, query_embed),
         "hash": text_hash,
         "title": meta.get("title", ""),
         "description": meta.get("description", ""),
