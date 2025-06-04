@@ -22,23 +22,30 @@ from readability import Document
 from sentence_transformers import SentenceTransformer
 from transformers import GPT2TokenizerFast
 
+# App setup
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger()
+logger = logging.getLogger()
 
+# Initialization
 DetectorFactory.seed = 0
+ensure_punkt = lambda: (
+    nltk.download("punkt", quiet=True)
+    if not nltk.data.find("tokenizers/punkt")
+    else None
+)
+ensure_punkt()
 
+# Constants
 MAX_PARALLEL_TASKS = os.cpu_count() or 4
 VERBOSE = True
 CACHE_EXPIRATION = 10
 SEARXNG_BASE_URL = "http://localhost:8888/search"
-
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     "Mozilla/5.0 (X11; Linux x86_64)",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
 ]
-
 BLOCKED_DOMAINS = {
     "facebook.com",
     "twitter.com",
@@ -60,7 +67,6 @@ BLOCKED_DOMAINS = {
     "bloomberg.com",
     "marketwatch.com",
 }
-
 BLOCKED_KEYWORDS = [
     "reddit",
     "quora",
@@ -77,22 +83,12 @@ BLOCKED_KEYWORDS = [
     "showthread",
     "archive",
 ]
-
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
+# Clients & models
 timeout_obj = ClientTimeout(total=5)
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
 model_embed = SentenceTransformer("intfloat/e5-base-v2")
-
-
-def ensure_punkt():
-    try:
-        nltk.data.find("tokenizers/punkt")
-    except LookupError:
-        nltk.download("punkt", quiet=True)
-
-
-ensure_punkt()
 
 
 def detect_language(text):
@@ -130,32 +126,36 @@ def is_valid_link(url):
         return False
     if not url.lower().startswith(("http://", "https://")):
         return False
-    if any(char in url for char in ['"', "'", "\\", " "]):
+    if any(c in url for c in ['"', "'", "\\", " "]):
         return False
-    if any(bad in url.lower() for bad in BLOCKED_KEYWORDS):
+    if any(kw in url.lower() for kw in BLOCKED_KEYWORDS):
         return False
-    ext = url.lower().split("?")[0].split("#")[0].split(".")[-1]
-    if ext in ["pdf", "doc", "xls", "zip", "rar", "ppt"]:
+    if url.lower().split("?")[0].split("#")[0].split(".")[-1] in [
+        "pdf",
+        "doc",
+        "xls",
+        "zip",
+        "rar",
+        "ppt",
+    ]:
         return False
     if url.count("/") <= 2:
         return False
     return True
 
 
-def cache_path_html(url):
-    return f"cache/html/{hashlib.md5(normalize_url(url).encode()).hexdigest()}.html"
-
-
-def cache_path_summary(url):
-    return f"cache/summary/{hashlib.md5(normalize_url(url).encode()).hexdigest()}.json"
+def build_cache_path(url, folder, extension):
+    filename = hashlib.md5(normalize_url(url).encode()).hexdigest()
+    return f"{folder}/{filename}.{extension}"
 
 
 def read_cache(path):
-    if os.path.exists(path):
-        age = time.time() - os.path.getmtime(path)
-        if age < CACHE_EXPIRATION:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f) if path.endswith(".json") else f.read()
+    if (
+        os.path.exists(path)
+        and (time.time() - os.path.getmtime(path)) < CACHE_EXPIRATION
+    ):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f) if path.endswith(".json") else f.read()
     return None
 
 
@@ -169,33 +169,33 @@ def save_cache(path, content):
 
 
 def read_cache_html(url):
-    return read_cache(cache_path_html(url))
+    return read_cache(build_cache_path(url, "cache/html", "html"))
 
 
 def save_cache_html(url, html):
-    save_cache(cache_path_html(url), html)
+    save_cache(build_cache_path(url, "cache/html", "html"), html)
 
 
 def read_cache_summary(url):
-    return read_cache(cache_path_summary(url))
+    return read_cache(build_cache_path(url, "cache/summary", "json"))
 
 
 def save_cache_summary(url, summary):
-    save_cache(cache_path_summary(url), summary)
+    save_cache(build_cache_path(url, "cache/summary", "json"), summary)
 
 
-def clean_expired_cache(folder="cache", exp_secs=CACHE_EXPIRATION):
+def clean_expired_cache(folder="cache", expiration=CACHE_EXPIRATION):
     if not os.path.exists(folder):
         return
     now = time.time()
     for root, _, files in os.walk(folder):
-        for f in files:
-            p = os.path.join(root, f)
-            if os.path.isfile(p) and now - os.path.getmtime(p) > exp_secs:
+        for file in files:
+            path = os.path.join(root, file)
+            if os.path.isfile(path) and (now - os.path.getmtime(path)) > expiration:
                 try:
-                    os.remove(p)
+                    os.remove(path)
                 except Exception:
-                    pass
+                    continue
 
 
 def preprocess_html(html):
@@ -251,9 +251,9 @@ async def extract_metadata(html):
     desc = soup.find("meta", attrs={"name": "description"}) or soup.find(
         "meta", attrs={"property": "og:description"}
     )
+    author = soup.find("meta", attrs={"name": "author"})
     if isinstance(desc, Tag):
         meta["description"] = safe_strip(desc.get("content"))
-    author = soup.find("meta", attrs={"name": "author"})
     if isinstance(author, Tag):
         meta["author"] = safe_strip(author.get("content"))
     return meta
@@ -275,25 +275,26 @@ def filter_text(text):
         "register",
         "comment section",
     ]
-    filtered = []
-    for l in lines:
-        ls = l.strip()
-        if len(ls) >= 15 and not any(x in ls.lower() for x in blacklist):
-            filtered.append(ls)
-    return "\n".join(filtered)
+    return "\n".join(
+        line.strip()
+        for line in lines
+        if len(line.strip()) >= 15 and not any(b in line.lower() for b in blacklist)
+    )
 
 
 async def download_html_async(url, session, lang="en"):
     cached = read_cache_html(url)
     if cached:
         return cached
+
     headers = {
         "User-Agent": get_user_agent(),
-        "Accept-Language": "en-US,en;q=0.9" if lang != "pt" else "pt-BR,pt;q=0.9",
+        "Accept-Language": "pt-BR,pt;q=0.9" if lang == "pt" else "en-US,en;q=0.9",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Connection": "keep-alive",
     }
     cookies = {"age_verified": "1", "RTA": "1"}
+
     for attempt in range(1, 3):
         try:
             async with session.get(
@@ -314,11 +315,12 @@ def cosine_similarity(v1, v2):
     return float(np.dot(v1 / np.linalg.norm(v1), v2 / np.linalg.norm(v2)))
 
 
-async def search_engine_async(query, links_to_scrap):
+async def search_engine_async(query, link_count):
     query_embed = model_embed.encode([query])[0]
     query_string = urlencode({"q": query, "format": "json", "language": "en"})
     url = f"{SEARXNG_BASE_URL}?{query_string}"
     ranked_links = []
+
     try:
         async with aiohttp.ClientSession(timeout=timeout_obj) as session:
             async with session.get(
@@ -329,41 +331,41 @@ async def search_engine_async(query, links_to_scrap):
                 data = await resp.json()
                 for result in data.get("results", []):
                     link = result.get("url")
-                    title = result.get("title", "")
-                    snippet = result.get("content", "")
                     if link and is_valid_link(link):
+                        title = result.get("title", "")
+                        snippet = result.get("content", "")
                         score = cosine_similarity(
                             query_embed,
                             model_embed.encode([f"passage: {title} {snippet}"])[0],
                         )
                         ranked_links.append((score, link))
         ranked_links.sort(reverse=True)
-        return [link for _, link in ranked_links[:links_to_scrap]]
+        return [link for _, link in ranked_links[:link_count]]
     except Exception as e:
-        log.warning(f"[SEARXNG ERROR] {e}")
-    return []
+        logger.warning(f"[SEARXNG ERROR] {e}")
+        return []
 
 
 def extract_relevant_links_from_html(html, base_url, query_embed):
     soup = BeautifulSoup(html, "lxml")
-    links_with_scores, seen = [], set()
+    links_with_scores = []
+    seen = set()
+
     for a in soup.find_all("a", href=True):
-        if not isinstance(a, Tag):
-            continue
-        href = a.get("href")
-        anchor_text = a.get_text(strip=True)
-        if not isinstance(href, str):
-            continue
-        url = urljoin(base_url, href)
-        if is_valid_link(url) and url not in seen and anchor_text:
-            seen.add(url)
-            sim = cosine_similarity(
-                query_embed, model_embed.encode([f"passage: {anchor_text}"])[0]
-            )
-            links_with_scores.append((sim, url))
+        if isinstance(a, Tag):
+            href = a.get("href")
+            text = a.get_text(strip=True)
+            if isinstance(href, str):
+                url = urljoin(base_url, href)
+                if is_valid_link(url) and url not in seen and text:
+                    seen.add(url)
+                    sim = cosine_similarity(
+                        query_embed, model_embed.encode([f"passage: {text}"])[0]
+                    )
+                    links_with_scores.append((sim, url))
+
     if links_with_scores:
-        scores = [s for s, _ in links_with_scores]
-        threshold = np.percentile(scores, 75)
+        threshold = np.percentile([s for s, _ in links_with_scores], 75)
         return [
             url for sim, url in links_with_scores if sim >= max(float(threshold), 0.35)
         ][:15]
@@ -373,17 +375,20 @@ def extract_relevant_links_from_html(html, base_url, query_embed):
 async def process_url_async(url, session, query_embed):
     if not is_valid_link(url):
         return None
+
     html = await download_html_async(url, session)
     if not html:
         return None
+
     text = filter_text(extract_content(html))
-    relevant_links = extract_relevant_links_from_html(html, url, query_embed)
     if len(text) < 200:
         try:
-            soup = BeautifulSoup(Document(html).summary(), "lxml")
-            text = filter_text(soup.get_text("\n"))
+            text = filter_text(
+                BeautifulSoup(Document(html).summary(), "lxml").get_text("\n")
+            )
         except Exception:
             text = ""
+
     if len(text) < 200:
         try:
             soup = BeautifulSoup(html, "lxml")
@@ -394,36 +399,44 @@ async def process_url_async(url, session, query_embed):
             text = filter_text(soup.get_text("\n"))
         except Exception:
             return None
+
     if len(text.strip()) < 300:
         return None
+
     lang = detect_language(text)
     if lang != "en":
         text = translate_text(text, "en")
-        lang = "en"
+
     summary_cache = read_cache_summary(url)
     text_hash = hashlib.md5(text.encode()).hexdigest()
     if isinstance(summary_cache, dict) and summary_cache.get("hash") == text_hash:
         return summary_cache
+
     meta = await extract_metadata(html)
     result = {
         "url": url,
         "summary": text.strip(),
-        "relevant_links": relevant_links,
+        "relevant_links": extract_relevant_links_from_html(html, url, query_embed),
         "hash": text_hash,
         "title": meta.get("title", ""),
         "description": meta.get("description", ""),
         "author": meta.get("author", ""),
-        "language": lang,
+        "language": "en",
     }
+
     save_cache_summary(url, result)
     return result
 
 
 async def advanced_search_async(query, links_to_scrap, max_sites):
     query_embed = model_embed.encode([f"query: {query}"])[0]
-    collected, all_links, results, processed = set(), [], [], set()
+    collected = set()
+    all_links = []
+    results = []
+    processed = set()
     sem = asyncio.Semaphore(MAX_PARALLEL_TASKS)
     max_links = links_to_scrap
+
     async with aiohttp.ClientSession(timeout=timeout_obj) as session:
 
         async def worker(url):
@@ -454,9 +467,11 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
                     break
                 collected.update(new_links)
                 all_links.extend(new_links)
+
             i = launch(i, tasks)
             if not tasks:
                 break
+
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for d in done:
                 tasks.remove(d)
@@ -478,8 +493,10 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
     ]
     for r in results:
         r["similarity"] = float(r["similarity"])
+
     with open("results.json", "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
+
     return results
 
 
@@ -494,12 +511,13 @@ async def search(
 ):
     clean_expired_cache()
     results = await advanced_search_async(query, links_to_scrap, summaries)
-    minimal_results = [
-        {
-            "title": item["title"] or item["url"],
-            "summary": item["summary"],
-            "links": item.get("relevant_links", []) or [item["url"]],
-        }
-        for item in results
-    ]
-    return JSONResponse(content=minimal_results)
+    return JSONResponse(
+        content=[
+            {
+                "title": item["title"] or item["url"],
+                "summary": item["summary"],
+                "links": item.get("relevant_links", []) or [item["url"]],
+            }
+            for item in results
+        ]
+    )
