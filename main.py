@@ -42,10 +42,7 @@ BLOCKED_DOMAINS = {
     "linkedin.com",
     "pinterest.com",
     "tiktok.com",
-    "reddit.com",
     "quora.com",
-    "4chan.org",
-    "tumblr.com",
     "fandom.com",
     "wikia.org",
     "wikihow.com",
@@ -56,13 +53,9 @@ BLOCKED_DOMAINS = {
     "marketwatch.com",
 }
 BLOCKED_KEYWORDS = [
-    "reddit",
     "quora",
-    "forum",
-    "community",
     "board",
     "discussion",
-    "chat",
     "signup",
     "login",
     "register",
@@ -125,8 +118,6 @@ def is_valid_link(url):
         "rar",
         "ppt",
     ]:
-        return False
-    if url.count("/") <= 2:
         return False
     return True
 
@@ -354,7 +345,7 @@ def extract_relevant_links_from_html(html, base_url, query_embed):
         threshold = np.percentile([s for s, _ in links_with_scores], 75)
         return [
             url for sim, url in links_with_scores if sim >= max(float(threshold), 0.35)
-        ][:15]
+        ][:5]
     return []
 
 
@@ -502,7 +493,8 @@ async def search(
             {
                 "title": item["title"] or item["url"],
                 "summary": item["summary"],
-                "links": item.get("relevant_links", []) or [item["url"]],
+                "links": item.get("relevant_links", []),
+                "videos": item.get("video_links", []),
             }
             for item in results
         ]
