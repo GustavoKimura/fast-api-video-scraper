@@ -549,7 +549,7 @@ async def search(
             {
                 "title": item["title"] or item["url"],
                 "summary": item["summary"],
-                "links": item.get("relevant_links", []),
+                "links": item.get("summary_links", []),
                 "videos": item.get("video_links", []),
             }
             for item in results
