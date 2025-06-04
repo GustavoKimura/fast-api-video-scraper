@@ -62,6 +62,13 @@ BLOCKED_DOMAINS = {
     "reuters.com",
     "bloomberg.com",
     "marketwatch.com",
+    "brave.com",
+    "brave.so",
+    "search.brave.com",
+    "account.brave.com",
+    "hackerone.com/brave",
+    "status.brave.app",
+    "talk.brave.com",
 }
 
 BLOCKED_KEYWORDS = [
@@ -405,42 +412,47 @@ async def process_url_async(url, session):
     return result
 
 
-async def search_engine_async(query, max_results=5):
+async def search_engine_async(query, links_to_scrap):
     query_string = urlencode({"q": query})
-    url = f"https://search.brave.com/search?{query_string}"
+    base_url = f"https://search.brave.com/search?{query_string}"
     headers = {
         "User-Agent": get_user_agent(),
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate",
     }
     cookies = {"age_verified": "1", "RTA": "1"}
+    collected_links = set()
+    offset = 0
     try:
-        async with aiohttp.ClientSession(
-            timeout=timeout_obj, auto_decompress=True
-        ) as session:
-            async with session.get(
-                url, cookies=cookies, headers=headers, timeout=timeout_obj
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                html = await resp.text()
-                soup = BeautifulSoup(html, "lxml")
-                links, seen = [], set()
-                for a in soup.find_all("a", href=True):
-                    if isinstance(a, Tag):
-                        href = a.get("href")
-                        if isinstance(href, str) and is_valid_link(href):
-                            norm = normalize_url(href)
-                            if norm not in seen:
-                                seen.add(norm)
-                                links.append(href)
-                                if len(links) >= max_results:
-                                    break
-                return links
+        async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+            while len(collected_links) < links_to_scrap:
+                url = f"{base_url}&offset={offset}"
+                async with session.get(
+                    url, cookies=cookies, headers=headers, timeout=timeout_obj
+                ) as resp:
+                    if resp.status != 200:
+                        break
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, "lxml")
+                    links = set()
+                    for a in soup.find_all("a", href=True):
+                        if isinstance(a, Tag):
+                            href = a.get("href")
+                            if is_valid_link(href):
+                                norm = normalize_url(href)
+                                if norm not in collected_links:
+                                    collected_links.add(norm)
+                                    links.add(href)
+                            if len(collected_links) >= links_to_scrap:
+                                break
+                    collected_links.update(links)
+                offset += 1
+                if len(collected_links) >= links_to_scrap:
+                    break
+                await asyncio.sleep(random.uniform(1, 2))
     except Exception as e:
-        if VERBOSE:
-            log.warning(f"[ERROR] {e}")
-        return []
+        log.warning(f"[ERROR] {e}")
+    return list(collected_links)[:links_to_scrap]
 
 
 def cosine_similarity(v1, v2):
