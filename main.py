@@ -274,7 +274,7 @@ async def download_html_async(url, session, lang="en"):
 
     for attempt in range(1, 3):
         try:
-            async with session.get(
+            async with session.post(
                 url, headers=headers, cookies=cookies, timeout=timeout_obj
             ) as resp:
                 if resp.status == 200:
@@ -293,15 +293,15 @@ def cosine_similarity(v1, v2):
 
 
 async def search_engine_async(query, link_count):
-    query_embed = model_embed.encode([query])[0]
-    query_string = urlencode({"q": query, "format": "json", "language": "en"})
-    url = f"{SEARXNG_BASE_URL}?{query_string}"
+    payload = {"q": query, "format": "json", "language": "en"}
     ranked_links = []
 
     try:
         async with aiohttp.ClientSession(timeout=timeout_obj) as session:
-            async with session.get(
-                url, headers={"User-Agent": get_user_agent()}
+            async with session.post(
+                url=SEARXNG_BASE_URL,
+                data=payload,
+                headers={"User-Agent": get_user_agent()},
             ) as resp:
                 if resp.status != 200:
                     return []
@@ -312,7 +312,7 @@ async def search_engine_async(query, link_count):
                         title = result.get("title", "")
                         snippet = result.get("content", "")
                         score = cosine_similarity(
-                            query_embed,
+                            model_embed.encode([query])[0],
                             model_embed.encode([f"passage: {title} {snippet}"])[0],
                         )
                         ranked_links.append((score, link))
