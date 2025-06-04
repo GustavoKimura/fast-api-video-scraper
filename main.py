@@ -32,9 +32,9 @@ DetectorFactory.seed = 0
 
 MAX_PARALLEL_TASKS = os.cpu_count() or 4
 VERBOSE = True
-SAVE_JSON = True
-SAVE_MD = True
 CACHE_EXPIRATION = 10
+
+SEARXNG_BASE_URL = "http://localhost:8888/search"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -62,13 +62,6 @@ BLOCKED_DOMAINS = {
     "reuters.com",
     "bloomberg.com",
     "marketwatch.com",
-    "brave.com",
-    "brave.so",
-    "search.brave.com",
-    "account.brave.com",
-    "hackerone.com/brave",
-    "status.brave.app",
-    "talk.brave.com",
 }
 
 BLOCKED_KEYWORDS = [
@@ -89,18 +82,6 @@ BLOCKED_KEYWORDS = [
 ]
 
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
-
-PRIORITY_TLDS = {".gov", ".edu", ".org", ".br"}
-
-PRIORITY_DOMAINS = {
-    "bbc.com",
-    "nytimes.com",
-    "g1.globo.com",
-    "folha.uol.com.br",
-    "uol.com.br",
-    "gov.br",
-    "unesco.org",
-}
 
 timeout_obj = ClientTimeout(total=5)
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
@@ -148,14 +129,6 @@ def normalize_url(url):
 def get_main_domain(url):
     ext = tldextract.extract(url)
     return f"{ext.domain}.{ext.suffix}" if ext.suffix else ext.domain
-
-
-def is_priority_domain(url):
-    d = get_main_domain(url)
-    if d in PRIORITY_DOMAINS:
-        return True
-    tld = "." + d.split(".")[-1]
-    return tld in PRIORITY_TLDS
 
 
 def is_valid_link(url):
@@ -327,9 +300,15 @@ async def download_html_async(url, session, lang="en"):
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Connection": "keep-alive",
     }
+    cookies = {
+        "age_verified": "1",
+        "RTA": "1",
+    }
     for attempt in range(1, 3):
         try:
-            async with session.get(url, headers=headers, timeout=timeout_obj) as resp:
+            async with session.get(
+                url, headers=headers, cookies=cookies, timeout=timeout_obj
+            ) as resp:
                 if resp.status == 200:
                     html = await resp.text()
                     html = preprocess_html(html)
@@ -354,12 +333,6 @@ def extract_relevant_links_from_html(html, base_url):
         if is_valid_link(url) and url not in seen:
             seen.add(url)
             links.append(url)
-
-    def link_priority(u):
-        d = get_main_domain(u)
-        return (0 if d in PRIORITY_DOMAINS else 1, -int(is_priority_domain(u)))
-
-    links = sorted(links, key=link_priority)
     return links[:15]
 
 
@@ -413,45 +386,27 @@ async def process_url_async(url, session):
 
 
 async def search_engine_async(query, links_to_scrap):
-    query_string = urlencode({"q": query})
-    base_url = f"https://search.brave.com/search?{query_string}"
-    headers = {
-        "User-Agent": get_user_agent(),
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate",
-    }
-    cookies = {"age_verified": "1", "RTA": "1"}
+    query_string = urlencode({"q": query, "format": "json", "language": "en"})
+    url = f"{SEARXNG_BASE_URL}?{query_string}"
     collected_links = set()
-    offset = 0
     try:
         async with aiohttp.ClientSession(timeout=timeout_obj) as session:
-            while len(collected_links) < links_to_scrap:
-                url = f"{base_url}&offset={offset}"
-                async with session.get(
-                    url, cookies=cookies, headers=headers, timeout=timeout_obj
-                ) as resp:
-                    if resp.status != 200:
+            async with session.get(
+                url, headers={"User-Agent": get_user_agent()}
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                for result in data.get("results", []):
+                    link = result.get("url")
+                    if link and is_valid_link(link):
+                        norm = normalize_url(link)
+                        if norm not in collected_links:
+                            collected_links.add(norm)
+                    if len(collected_links) >= links_to_scrap:
                         break
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, "lxml")
-                    links = set()
-                    for a in soup.find_all("a", href=True):
-                        if isinstance(a, Tag):
-                            href = a.get("href")
-                            if is_valid_link(href):
-                                norm = normalize_url(href)
-                                if norm not in collected_links:
-                                    collected_links.add(norm)
-                                    links.add(href)
-                            if len(collected_links) >= links_to_scrap:
-                                break
-                    collected_links.update(links)
-                offset += 1
-                if len(collected_links) >= links_to_scrap:
-                    break
-                await asyncio.sleep(random.uniform(1, 2))
     except Exception as e:
-        log.warning(f"[ERROR] {e}")
+        log.warning(f"[SEARXNG ERROR] {e}")
     return list(collected_links)[:links_to_scrap]
 
 
@@ -509,27 +464,13 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
         r["similarity"] = 0.7 * cosine_similarity(
             query_embed, model_embed.encode([r["summary"]])[0]
         ) + 0.3 * cosine_similarity(query_embed, sim_title)
-        r["priority"] = int(is_priority_domain(r["url"]))
-    results = sorted(
-        results, key=lambda x: (x["priority"], x.get("similarity", 0)), reverse=True
-    )[:max_sites]
+    results = sorted(results, key=lambda x: x.get("similarity", 0), reverse=True)[
+        :max_sites
+    ]
     for r in results:
         r["similarity"] = float(r["similarity"])
-    if SAVE_JSON:
-        with open("results.json", "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
-    if SAVE_MD:
-        with open("results.md", "w", encoding="utf-8") as f:
-            for i, item in enumerate(results, 1):
-                f.write(f"## {i}. {item['title'] or item['url']}\n\n")
-                if item.get("description"):
-                    f.write(f"*Description:* {item['description']}\n\n")
-                f.write(item["summary"] + "\n\n")
-                if item.get("relevant_links"):
-                    f.write("*Relevant links:*\n")
-                    for l in item["relevant_links"]:
-                        f.write(f"- {l}\n")
-                    f.write("\n")
+    with open("results.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
     return results
 
 
