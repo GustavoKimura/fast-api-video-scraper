@@ -82,7 +82,7 @@ LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
 timeout_obj = ClientTimeout(total=5)
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-model_embed = SentenceTransformer("all-MiniLM-L6-v2")
+model_embed = SentenceTransformer("intfloat/e5-base-v2")
 
 
 def ensure_punkt():
@@ -336,7 +336,8 @@ async def search_engine_async(query, links_to_scrap):
                     snippet = result.get("content", "")
                     if link and is_valid_link(link):
                         score = cosine_similarity(
-                            query_embed, model_embed.encode([title + " " + snippet])[0]
+                            query_embed,
+                            model_embed.encode([f"passage: {title} {snippet}"])[0],
                         )
                         ranked_links.append((score, link))
         ranked_links.sort(reverse=True)
@@ -349,23 +350,29 @@ async def search_engine_async(query, links_to_scrap):
 
 def extract_relevant_links_from_html(html, base_url, query_embed):
     soup = BeautifulSoup(html, "lxml")
-    links, seen = [], set()
+    links_with_scores, seen = [], set()
     for a in soup.find_all("a", href=True):
-        if isinstance(a, Tag):
-            href = a.get("href")
-            anchor_text = a.get_text(strip=True)
-            if not isinstance(href, str):
-                continue
-            url = urljoin(base_url, href)
-            if is_valid_link(url) and url not in seen:
-                seen.add(url)
-                if anchor_text:
-                    sim = cosine_similarity(
-                        query_embed, model_embed.encode([anchor_text])[0]
-                    )
-                    if sim > 0.5:
-                        links.append(url)
-    return links[:15]
+        if not isinstance(a, Tag):
+            continue
+        href = a.get("href")
+        anchor_text = a.get_text(strip=True)
+        if not isinstance(href, str):
+            continue
+        url = urljoin(base_url, href)
+        if is_valid_link(url) and url not in seen and anchor_text:
+            seen.add(url)
+            sim = cosine_similarity(
+                query_embed, model_embed.encode([f"passage: {anchor_text}"])[0]
+            )
+            links_with_scores.append((sim, url))
+    if links_with_scores:
+        scores = [s for s, _ in links_with_scores]
+        threshold = np.percentile(scores, 75)
+        filtered_links = [
+            url for sim, url in links_with_scores if sim >= max(float(threshold), 0.35)
+        ]
+        return filtered_links[:15]
+    return []
 
 
 async def process_url_async(url, session, query_embed):
@@ -418,7 +425,7 @@ async def process_url_async(url, session, query_embed):
 
 
 async def advanced_search_async(query, links_to_scrap, max_sites):
-    query_embed = model_embed.encode([query])[0]
+    query_embed = model_embed.encode([f"query: {query}"])[0]
     collected, all_links, results, processed = set(), [], [], set()
     sem = asyncio.Semaphore(MAX_PARALLEL_TASKS)
     max_links = links_to_scrap
@@ -460,9 +467,9 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
                 tasks.remove(d)
                 r = d.result()
                 if r:
-                    summary_embed = model_embed.encode([r["summary"]])[0]
+                    summary_embed = model_embed.encode([f"passage: {r['summary']}"])[0]
                     title_embed = (
-                        model_embed.encode([r["title"]])[0]
+                        model_embed.encode([f"passage: {r['title']}"])[0]
                         if r["title"]
                         else query_embed
                     )
