@@ -17,7 +17,6 @@ from bs4 import BeautifulSoup, Tag
 from deep_translator import GoogleTranslator
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
-from fake_useragent import UserAgent
 from langdetect import DetectorFactory, detect
 from readability import Document
 from sentence_transformers import SentenceTransformer
@@ -29,11 +28,9 @@ log = logging.getLogger()
 
 DetectorFactory.seed = 0
 
-
 MAX_PARALLEL_TASKS = os.cpu_count() or 4
 VERBOSE = True
 CACHE_EXPIRATION = 10
-
 SEARXNG_BASE_URL = "http://localhost:8888/search"
 
 USER_AGENTS = [
@@ -86,7 +83,6 @@ LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 timeout_obj = ClientTimeout(total=5)
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
 model_embed = SentenceTransformer("all-MiniLM-L6-v2")
-ua = UserAgent()
 
 
 def ensure_punkt():
@@ -115,10 +111,7 @@ def translate_text(text, target="en"):
 
 
 def get_user_agent():
-    try:
-        return ua.random
-    except Exception:
-        return random.choice(USER_AGENTS)
+    return random.choice(USER_AGENTS)
 
 
 def normalize_url(url):
@@ -320,30 +313,69 @@ async def download_html_async(url, session, lang="en"):
     return ""
 
 
-def extract_relevant_links_from_html(html, base_url):
+def cosine_similarity(v1, v2):
+    return float(np.dot(v1 / np.linalg.norm(v1), v2 / np.linalg.norm(v2)))
+
+
+async def search_engine_async(query, links_to_scrap):
+    query_embed = model_embed.encode([query])[0]
+    query_string = urlencode({"q": query, "format": "json", "language": "en"})
+    url = f"{SEARXNG_BASE_URL}?{query_string}"
+    ranked_links = []
+    try:
+        async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+            async with session.get(
+                url, headers={"User-Agent": get_user_agent()}
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                for result in data.get("results", []):
+                    link = result.get("url")
+                    title = result.get("title", "")
+                    snippet = result.get("content", "")
+                    if link and is_valid_link(link):
+                        score = cosine_similarity(
+                            query_embed, model_embed.encode([title + " " + snippet])[0]
+                        )
+                        ranked_links.append((score, link))
+        ranked_links.sort(reverse=True)
+        top_links = [link for _, link in ranked_links[:links_to_scrap]]
+        return top_links
+    except Exception as e:
+        log.warning(f"[SEARXNG ERROR] {e}")
+    return []
+
+
+def extract_relevant_links_from_html(html, base_url, query_embed):
     soup = BeautifulSoup(html, "lxml")
     links, seen = [], set()
     for a in soup.find_all("a", href=True):
-        if not isinstance(a, Tag):
-            continue
-        href = a.get("href")
-        if not isinstance(href, str):
-            continue
-        url = urljoin(base_url, href)
-        if is_valid_link(url) and url not in seen:
-            seen.add(url)
-            links.append(url)
+        if isinstance(a, Tag):
+            href = a.get("href")
+            anchor_text = a.get_text(strip=True)
+            if not isinstance(href, str):
+                continue
+            url = urljoin(base_url, href)
+            if is_valid_link(url) and url not in seen:
+                seen.add(url)
+                if anchor_text:
+                    sim = cosine_similarity(
+                        query_embed, model_embed.encode([anchor_text])[0]
+                    )
+                    if sim > 0.5:
+                        links.append(url)
     return links[:15]
 
 
-async def process_url_async(url, session):
+async def process_url_async(url, session, query_embed):
     if not is_valid_link(url):
         return None
     html = await download_html_async(url, session)
     if not html:
         return None
     text = filter_text(extract_content(html))
-    relevant_links = extract_relevant_links_from_html(html, url)
+    relevant_links = extract_relevant_links_from_html(html, url, query_embed)
     if len(text) < 200:
         try:
             soup = BeautifulSoup(Document(html).summary(), "lxml")
@@ -385,36 +417,8 @@ async def process_url_async(url, session):
     return result
 
 
-async def search_engine_async(query, links_to_scrap):
-    query_string = urlencode({"q": query, "format": "json", "language": "en"})
-    url = f"{SEARXNG_BASE_URL}?{query_string}"
-    collected_links = set()
-    try:
-        async with aiohttp.ClientSession(timeout=timeout_obj) as session:
-            async with session.get(
-                url, headers={"User-Agent": get_user_agent()}
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                for result in data.get("results", []):
-                    link = result.get("url")
-                    if link and is_valid_link(link):
-                        norm = normalize_url(link)
-                        if norm not in collected_links:
-                            collected_links.add(norm)
-                    if len(collected_links) >= links_to_scrap:
-                        break
-    except Exception as e:
-        log.warning(f"[SEARXNG ERROR] {e}")
-    return list(collected_links)[:links_to_scrap]
-
-
-def cosine_similarity(v1, v2):
-    return float(np.dot(v1 / np.linalg.norm(v1), v2 / np.linalg.norm(v2)))
-
-
 async def advanced_search_async(query, links_to_scrap, max_sites):
+    query_embed = model_embed.encode([query])[0]
     collected, all_links, results, processed = set(), [], [], set()
     sem = asyncio.Semaphore(MAX_PARALLEL_TASKS)
     max_links = links_to_scrap
@@ -423,7 +427,7 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
         async def worker(url):
             async with sem:
                 try:
-                    return await process_url_async(url, session)
+                    return await process_url_async(url, session, query_embed)
                 except Exception:
                     return None
 
@@ -456,14 +460,17 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
                 tasks.remove(d)
                 r = d.result()
                 if r:
+                    summary_embed = model_embed.encode([r["summary"]])[0]
+                    title_embed = (
+                        model_embed.encode([r["title"]])[0]
+                        if r["title"]
+                        else query_embed
+                    )
+                    r["similarity"] = 0.7 * cosine_similarity(
+                        query_embed, summary_embed
+                    ) + 0.3 * cosine_similarity(query_embed, title_embed)
                     results.append(r)
-    query_embed = model_embed.encode([query])[0]
-    for r in results:
-        title = r["title"] or ""
-        sim_title = model_embed.encode([title])[0] if title else query_embed
-        r["similarity"] = 0.7 * cosine_similarity(
-            query_embed, model_embed.encode([r["summary"]])[0]
-        ) + 0.3 * cosine_similarity(query_embed, sim_title)
+
     results = sorted(results, key=lambda x: x.get("similarity", 0), reverse=True)[
         :max_sites
     ]
@@ -578,7 +585,7 @@ def index():
 
 @app.get("/search")
 async def search(
-    query: str = "Search something...", links_to_scrap: int = 10, summaries: int = 5
+    query: str = "O que é batata inglesa?", links_to_scrap: int = 10, summaries: int = 5
 ):
     clean_expired_cache()
     results = await advanced_search_async(query, links_to_scrap, summaries)
