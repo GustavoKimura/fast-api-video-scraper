@@ -183,7 +183,6 @@ def preprocess_html(html):
             [
                 "script",
                 "style",
-                "iframe",
                 "noscript",
                 "header",
                 "footer",
@@ -353,13 +352,19 @@ def extract_video_links_from_html(html, base_url, query_embed):
     seen = set()
     links_with_scores = []
 
-    for tag in soup.find_all(["a", "video", "source"], href=True) + soup.find_all(
-        "a", src=True
-    ):
+    for tag in soup.find_all(
+        ["a", "video", "source", "iframe"], href=True
+    ) + soup.find_all("a", src=True):
         if not isinstance(tag, Tag):
             continue
         href = tag.get("href") or tag.get("src")
-        text = tag.get("title") or tag.get("alt") or tag.get_text(strip=True)
+        text = (
+            tag.get("title")
+            or tag.get("alt")
+            or tag.get("data-title")
+            or tag.get("data-name")
+            or tag.get_text(strip=True)
+        )
 
         if href:
             url = urljoin(base_url, str(href))
@@ -368,7 +373,18 @@ def extract_video_links_from_html(html, base_url, query_embed):
             seen.add(url)
 
             is_video = any(
-                x in url.lower() for x in ["/video", "/watch", "/view", ".mp4", ".m3u8"]
+                x in url.lower()
+                for x in [
+                    "/video",
+                    "/watch",
+                    "/view",
+                    ".mp4",
+                    ".m3u8",
+                    ".webm",
+                    ".mov",
+                    ".avi",
+                    ".flv",
+                ]
             )
             score = 0.0
 
@@ -415,7 +431,8 @@ async def process_url_async(url, session, query_embed):
         except Exception:
             return None
 
-    if len(text.strip()) < 300:
+    video_links = extract_video_links_from_html(html, url, query_embed)
+    if len(text.strip()) < 100 and not video_links:
         return None
 
     lang = detect_language(text)
@@ -432,7 +449,7 @@ async def process_url_async(url, session, query_embed):
         "url": url,
         "summary": text.strip(),
         "summary_links": extract_relevant_links_from_html(html, url, query_embed),
-        "video_links": extract_video_links_from_html(html, url, query_embed),
+        "video_links": video_links,
         "hash": text_hash,
         "title": meta.get("title", ""),
         "description": meta.get("description", ""),
