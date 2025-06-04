@@ -293,10 +293,7 @@ async def download_html_async(url, session, lang="en"):
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Connection": "keep-alive",
     }
-    cookies = {
-        "age_verified": "1",
-        "RTA": "1",
-    }
+    cookies = {"age_verified": "1", "RTA": "1"}
     for attempt in range(1, 3):
         try:
             async with session.get(
@@ -341,8 +338,7 @@ async def search_engine_async(query, links_to_scrap):
                         )
                         ranked_links.append((score, link))
         ranked_links.sort(reverse=True)
-        top_links = [link for _, link in ranked_links[:links_to_scrap]]
-        return top_links
+        return [link for _, link in ranked_links[:links_to_scrap]]
     except Exception as e:
         log.warning(f"[SEARXNG ERROR] {e}")
     return []
@@ -368,10 +364,9 @@ def extract_relevant_links_from_html(html, base_url, query_embed):
     if links_with_scores:
         scores = [s for s, _ in links_with_scores]
         threshold = np.percentile(scores, 75)
-        filtered_links = [
+        return [
             url for sim, url in links_with_scores if sim >= max(float(threshold), 0.35)
-        ]
-        return filtered_links[:15]
+        ][:15]
     return []
 
 
@@ -490,104 +485,7 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return """
-<html>
-  <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-      body {
-        margin: 0;
-        padding: 16px;
-        font-family: sans-serif;
-        background: #000;
-      }
-      form {
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-        max-width: 400px;
-        width: 100%;
-        margin: 0 auto 16px auto;
-      }
-      input {
-        font-size: 16px;
-        padding: 8px;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      label {
-        font-size: 14px;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        color: white;
-      }
-      button {
-        font-size: 16px;
-        padding: 8px;
-      }
-      #o {
-        background: #1a1a1a;
-        color: #e0e0e0;
-        padding: 12px;
-        border-radius: 4px;
-        margin-top: 16px;
-        text-align: justify;
-        word-break: break-word;
-        overflow-wrap: break-word;
-        max-width: 100%;
-        box-sizing: border-box;
-      }
-      #o a {
-        color: #5ab4f0;
-        text-decoration: none;
-        word-break: break-word;
-      }
-      #o a:hover {
-        color: #82cfff;
-        text-decoration: underline;
-      }
-    </style>
-  </head>
-  <body>
-    <form id="f">
-      <label for="q">Busca:</label>
-      <input id="q" type="text" placeholder="Qualquer besteira aqui..." required>
-      <label for="l">Quantidade de links a processar (Ex. 10):</label>
-      <input id="l" type="number" placeholder="Ex. 10" value="10" min="1" required>
-      <label for="s">Quantidade de resumos desejados (Ex. 5):</label>
-      <input id="s" type="number" placeholder="Ex. 5" value="5" min="1" required>
-      <button>Buscar</button>
-    </form>
-    <div id="o">Os resultados da busca aparecerão aqui.</div>
-    <script>
-      const f = document.getElementById('f');
-      const q = document.getElementById('q');
-      const l = document.getElementById('l');
-      const s = document.getElementById('s');
-      const o = document.getElementById('o');
-      f.onsubmit = async e => {
-        e.preventDefault();
-        o.textContent = 'Carregando...';
-        let query = encodeURIComponent(q.value);
-        let linksToScrap = parseInt(l.value);
-        let summaries = parseInt(s.value);
-        let result = await fetch(`/search?query=${query}&links_to_scrap=${linksToScrap}&summaries=${summaries}`);
-        let data = await result.json();
-        o.innerHTML = data.map((item, idx) => `
-          <div style="margin-bottom:20px; border-bottom:1px solid #eee; padding-bottom:12px;">
-            <strong>${idx + 1}. ${item.title}</strong><br>
-            <div style="margin:8px 0;">${item.summary.split('\\n').map(p => `<p style="margin: 0 0 10px 0;">${p}</p>`).join('')}</div>
-            <div>Links:<br>
-              ${item.links.map(link => `<a href="${link}" target="_blank">${link}</a>`).join('<br>')}
-            </div>
-          </div>
-        `).join('');
-      }
-    </script>
-  </body>
-</html>
-    """
+    return open("./index.html", encoding="utf-8").read()
 
 
 @app.get("/search")
