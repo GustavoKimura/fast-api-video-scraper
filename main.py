@@ -1,14 +1,12 @@
 import asyncio
 import hashlib
 import json
-import logging
 import os
 import random
 import time
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import aiohttp
-import nltk
 import numpy as np
 import tldextract
 import trafilatura
@@ -20,25 +18,15 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from langdetect import DetectorFactory, detect
 from readability import Document
 from sentence_transformers import SentenceTransformer
-from transformers import GPT2TokenizerFast
 
 # App setup
 app = FastAPI()
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger()
 
 # Initialization
 DetectorFactory.seed = 0
-ensure_punkt = lambda: (
-    nltk.download("punkt", quiet=True)
-    if not nltk.data.find("tokenizers/punkt")
-    else None
-)
-ensure_punkt()
 
 # Constants
 MAX_PARALLEL_TASKS = os.cpu_count() or 4
-VERBOSE = True
 CACHE_EXPIRATION = 10
 SEARXNG_BASE_URL = "http://localhost:8888/search"
 USER_AGENTS = [
@@ -87,7 +75,6 @@ LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
 # Clients & models
 timeout_obj = ClientTimeout(total=5)
-tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
 model_embed = SentenceTransformer("intfloat/e5-base-v2")
 
 
@@ -342,7 +329,6 @@ async def search_engine_async(query, link_count):
         ranked_links.sort(reverse=True)
         return [link for _, link in ranked_links[:link_count]]
     except Exception as e:
-        logger.warning(f"[SEARXNG ERROR] {e}")
         return []
 
 
