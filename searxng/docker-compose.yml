@@ -5,7 +5,7 @@ services:
     ports:
       - "8888:8080"
     command: >
-      sh -c "SEARXNG_SETTINGS_PATH=/etc/settings.yml python3 -m searxng"
+      sh -c "SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml python3 -m searxng"
     volumes:
-      - ./settings.yml:/etc/settings.yml:ro
+      - ./settings.yml:/etc/searxng/settings.yml:ro
     restart: unless-stopped
