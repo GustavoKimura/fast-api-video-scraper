@@ -4,8 +4,9 @@ services:
     container_name: searxng
     ports:
       - "8888:8080"
-    command: >
-      sh -c "SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml python3 -m searxng"
+    environment:
+      SEARXNG_SETTINGS_PATH: /etc/searxng/custom_settings.yml
+    command: python3 -m searxng
     volumes:
-      - ./settings.yml:/etc/searxng/settings.yml:ro
+      - ./settings.yml:/etc/searxng/custom_settings.yml
     restart: unless-stopped

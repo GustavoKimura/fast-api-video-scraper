@@ -78,6 +78,7 @@ results.md
 *.lnk
 searxng/*
 !/searxng/docker-compose.yml
+!/searxng/settings.yml
 
 # OS files
 .DS_Store

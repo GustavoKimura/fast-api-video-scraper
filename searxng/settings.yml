@@ -1,0 +1,138 @@
+default_doi_resolver: doi_org
+doi_resolvers:
+  doi_org: "https://doi.org"
+
+general:
+  debug: false
+  instance_name: "SearXNG"
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  autocomplete: "yandex"
+  autocomplete_min: 2
+  favicon_resolver: "duckduckgo"
+  default_lang: "en"
+  language_fallback: false
+  formats: [html, json]
+  ban_time_on_fail: 3
+  max_ban_time_on_fail: 30
+
+server:
+  port: 8888
+  bind_address: "0.0.0.0"
+  base_url: "http://localhost:8888"
+  public_instance: false
+  limiter: false
+  secret_key: "k10j5s+ciZnp}d'WG7AOx:y86^!#E`QD"
+  image_proxy: false
+  method: POST
+  default_http_headers:
+    X-Content-Type-Options: nosniff
+    X-Download-Options: noopen
+    X-Robots-Tag: noindex, nofollow
+    Referrer-Policy: no-referrer
+
+ui:
+  default_theme: simple
+  query_in_title: false
+  infinite_scroll: true
+  results_on_new_tab: true
+
+outgoing:
+  request_timeout: 5.0
+  enable_http2: true
+  pool_connections: 100
+  pool_maxsize: 50
+
+plugins:
+  searx.plugins.calculator.SXNGPlugin:
+    active: true
+  searx.plugins.hash_plugin.SXNGPlugin:
+    active: true
+  searx.plugins.self_info.SXNGPlugin:
+    active: true
+  searx.plugins.unit_converter.SXNGPlugin:
+    active: true
+  searx.plugins.tracker_url_remover.SXNGPlugin:
+    active: true
+
+engines:
+  - name: google
+    engine: google
+    shortcut: go
+
+  - name: bing
+    engine: bing
+    shortcut: bng
+
+  - name: yandex
+    engine: yandex
+    shortcut: yx
+
+  - name: brave
+    engine: brave
+    shortcut: br
+
+  - name: yahoo
+    engine: yahoo
+    shortcut: yh
+
+  - name: startpage
+    engine: startpage
+    shortcut: sp
+    disabled: true
+
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+    qwant_categ: videos
+    disabled: true
+
+  - name: mojeek
+    engine: mojeek
+    shortcut: mjk
+    disabled: true
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: true
+
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    disabled: true
+
+  - name: arxiv
+    engine: arxiv
+    shortcut: arx
+    disabled: true
+
+  - name: wikidata
+    engine: wikidata
+    shortcut: wd
+    disabled: true
+
+  - name: stackoverflow
+    engine: stackexchange
+    shortcut: st
+    api_site: "stackoverflow"
+    disabled: true
+
+  - name: github
+    engine: github
+    shortcut: gh
+    disabled: true
+
+  - name: mdn
+    shortcut: mdn
+    engine: json_engine
+    paging: true
+    search_url: https://developer.mozilla.org/api/v1/search?q={query}&page={pageno}
+    results_query: documents
+    url_query: mdn_url
+    url_prefix: https://developer.mozilla.org
+    title_query: title
+    content_query: summary
+    disabled: true
