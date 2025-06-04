@@ -12,8 +12,18 @@ if errorlevel 1 (
     goto wait_loop
 )
 
-echo Starting SearxNG container...
-docker compose up -d
+set "SEARXNG_DIR=%~dp0searxng"
 
-echo Server started on: http://192.168.0.103:8000
-uvicorn main:app --host 192.168.0.103 --port 8000 --reload
+if not exist "%SEARXNG_DIR%\docker-compose.yml" (
+    echo Error: Cannot find docker-compose.yml in "%SEARXNG_DIR%"
+    pause
+    exit /b 1
+)
+
+echo Starting SearxNG container...
+pushd "%SEARXNG_DIR%"
+docker compose up -d
+popd
+
+echo Server started on: http://127.0.0.1:8000
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload

@@ -76,6 +76,8 @@ cache
 results.json
 results.md
 *.lnk
+searxng/*
+!/searxng/docker-compose.yml
 
 # OS files
 .DS_Store
