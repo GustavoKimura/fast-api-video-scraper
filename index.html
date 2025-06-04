@@ -102,6 +102,10 @@
           `/search?query=${query}&links_to_scrap=${linksToScrap}&summaries=${summaries}`
         );
         let data = await result.json();
+        if (!Array.isArray(data) || data.length === 0) {
+          o.innerHTML = `<div>Nenhum resultado encontrado.</div>`;
+          return;
+        }
         o.innerHTML = data
           .map(
             (item, idx) => `
