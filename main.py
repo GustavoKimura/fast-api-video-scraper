@@ -298,14 +298,30 @@ def extract_content(html):
 
 
 def filter_text(text):
-    blacklist = ["advertisement", "cookies", "policy", "login", "register"]
-    return "\n".join(
-        [
-            l.strip()
-            for l in text.splitlines()
-            if len(l.strip()) >= 15 and not any(b in l.lower() for b in blacklist)
-        ]
-    )
+    blacklist = [
+        "advertisement",
+        "cookies",
+        "policy",
+        "login",
+        "register",
+        "modal window",
+        "escape will cancel",
+        "maximum storage duration",
+        "local storage",
+        "javascript",
+        "object(#",
+        "cookie consent",
+        "tracking",
+        "loading...",
+        "just a moment",
+        "please wait",
+    ]
+    filtered_lines = [
+        line.strip()
+        for line in text.splitlines()
+        if len(line.strip()) > 30 and not any(b in line.lower() for b in blacklist)
+    ]
+    return "\n".join(filtered_lines)
 
 
 def safe_strip(v):
