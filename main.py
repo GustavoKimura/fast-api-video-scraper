@@ -595,11 +595,14 @@ def index():
 @app.get("/search")
 async def search(query: str = "", links_to_scrap: int = 10, summaries: int = 5):
     clean_expired_cache()
-    results = [
-        r
-        for r in (await advanced_search_async(query, links_to_scrap, summaries))
-        if r.get("video_links")
-    ]
+
+    results = await advanced_search_async(query, links_to_scrap, summaries)
+
+    if not any(r.get("video_links") for r in results):
+        results = results[: max(5, summaries)]
+    else:
+        results = [r for r in results if r.get("video_links")]
+
     return JSONResponse(
         content=[
             {
