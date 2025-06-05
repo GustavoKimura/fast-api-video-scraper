@@ -1,6 +1,7 @@
 FROM python:3.11-slim
 
 ENV PIP_NO_CACHE_DIR=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libgtk-3-0 libxss1 libasound2 \
@@ -11,10 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-RUN pip install playwright && playwright install chromium
+RUN pip install playwright && playwright install --with-deps
 
 COPY . .
 

@@ -377,8 +377,10 @@ def extract_deep_links(html: str, base_url: str) -> list[str]:
     urls = set()
 
     for a in soup.find_all("a", href=True):
+        if not isinstance(a, Tag):
+            continue
         href = a["href"]
-        full_url = urljoin(base_url, href)
+        full_url = urljoin(base_url, str(href))
 
         if not is_valid_link(full_url):
             continue
@@ -605,11 +607,3 @@ async def qdrant_search(query: str, top_k: int = 10):
             for r in results
         ]
     )
-
-
-@app.get("/debug_search")
-async def debug_search(
-    query: str = "test", links_to_scrap: int = 10, summaries: int = 5
-):
-    results = await search_engine_async(query, links_to_scrap)
-    return JSONResponse(content={"fetched_links": results})
