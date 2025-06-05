@@ -15,10 +15,12 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from keybert import KeyBERT
 from playwright.async_api import async_playwright
+from boilerpy3 import extractors
 
 # === ⚙️ CONFIGURATION ===
 DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
+content_extractor = extractors.LargestContentExtractor()
 MAX_PARALLEL_TASKS = os.cpu_count() or 4
 CACHE_EXPIRATION = 10
 SEARXNG_BASE_URL = "http://searxng:8080/search"
@@ -297,50 +299,6 @@ def extract_content(html):
         return ""
 
 
-def filter_text(text):
-    blacklist = [
-        "advertisement",
-        "cookies",
-        "policy",
-        "login",
-        "register",
-        "modal window",
-        "escape will cancel",
-        "maximum storage duration",
-        "local storage",
-        "javascript",
-        "object(#",
-        "cookie consent",
-        "tracking",
-        "loading...",
-        "just a moment",
-        "please wait",
-        "cookie",
-        "consent",
-        "privacy",
-        "policy",
-        "login",
-        "register",
-        "advertisement",
-        "click here",
-        "subscribe",
-        "terms",
-        "cookies",
-        "this website uses",
-        "you can change your settings",
-        "our partners",
-    ]
-    lines = [line.strip() for line in text.splitlines()]
-    filtered = [
-        line
-        for line in lines
-        if len(line) > 30 and not any(b in line.lower() for b in blacklist)
-    ]
-    if len(filtered) < 5:
-        return ""
-    return "\n".join(filtered)
-
-
 def safe_strip(v):
     return v.strip() if isinstance(v, str) else ""
 
@@ -478,17 +436,19 @@ async def process_url_async(url, query_embed):
             url = deep_url
             break
 
-    text = filter_text(extract_content(html))
+    text = content_extractor.get_content(html)
     if len(text) < 200:
         try:
-            text = filter_text(
+            text = content_extractor.get_content(
                 BeautifulSoup(Document(html).summary(), "lxml").get_text("\n")
             )
         except:
             text = ""
     if len(text) < 200:
         try:
-            text = filter_text(BeautifulSoup(html, "lxml").get_text("\n"))
+            text = content_extractor.get_content(
+                BeautifulSoup(html, "lxml").get_text("\n")
+            )
         except:
             return None
 

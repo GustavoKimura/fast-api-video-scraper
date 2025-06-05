@@ -12,6 +12,7 @@ lxml>=5.2.1
 readability-lxml>=0.8.1
 trafilatura>=1.6.1
 tldextract>=5.1.2
+boilerpy3>=1.0.7
 
 # NLP / embedding
 torch>=2.2.2
