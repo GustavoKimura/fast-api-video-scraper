@@ -2,10 +2,16 @@ aiohttp
 beautifulsoup4
 deep_translator
 fastapi
+keybert
 langdetect
+lxml
 numpy
+open-clip-torch
+playwright
+qdrant-client
 readability-lxml
 sentence-transformers
 tldextract
+torch
 trafilatura
 uvicorn[standard]

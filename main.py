@@ -82,6 +82,7 @@ async def fetch_rendered_html_playwright(url: str, timeout: int = 15000) -> str:
             await page.wait_for_timeout(3000)
 
             html = await page.content()
+            await context.close()
             await browser.close()
             return html
     except Exception as e:
