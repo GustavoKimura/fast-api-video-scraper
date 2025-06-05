@@ -472,6 +472,9 @@ async def process_url_async(url, query_embed):
         "description": meta["description"],
         "author": meta["author"],
         "language": "en",
+        "tags": auto_generate_tags_from_text(
+            f"{text.strip()} {meta['title']}", top_k=10
+        ),
     }
     save_cache(cache_summary(url), result)
 
