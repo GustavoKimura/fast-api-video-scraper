@@ -315,13 +315,30 @@ def filter_text(text):
         "loading...",
         "just a moment",
         "please wait",
+        "cookie",
+        "consent",
+        "privacy",
+        "policy",
+        "login",
+        "register",
+        "advertisement",
+        "click here",
+        "subscribe",
+        "terms",
+        "cookies",
+        "this website uses",
+        "you can change your settings",
+        "our partners",
     ]
-    filtered_lines = [
-        line.strip()
-        for line in text.splitlines()
-        if len(line.strip()) > 30 and not any(b in line.lower() for b in blacklist)
+    lines = [line.strip() for line in text.splitlines()]
+    filtered = [
+        line
+        for line in lines
+        if len(line) > 30 and not any(b in line.lower() for b in blacklist)
     ]
-    return "\n".join(filtered_lines)
+    if len(filtered) < 5:
+        return ""
+    return "\n".join(filtered)
 
 
 def safe_strip(v):
@@ -506,7 +523,7 @@ async def process_url_async(url, query_embed):
         payload={
             "title": meta["title"],
             "description": meta["description"],
-            "tags": auto_generate_tags_from_text(text),
+            "tags": auto_generate_tags_from_text(text, top_k=10),
             "video_url": (result["video_links"][0] if result["video_links"] else ""),
             "source_url": url,
         },
