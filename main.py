@@ -399,18 +399,22 @@ def extract_video_sources(html, base_url):
     sources = set()
 
     for tag in soup.find_all(["video", "source"]):
+        if not isinstance(tag, Tag):
+            continue
         src = tag.get("src") or tag.get("data-src")
         if src:
-            full_url = urljoin(base_url, src)
+            full_url = urljoin(base_url, str(src))
             if any(
                 full_url.endswith(ext) for ext in [".mp4", ".webm", ".m3u8", ".mov"]
             ):
                 sources.add(full_url)
 
     for iframe in soup.find_all("iframe", src=True):
+        if not isinstance(iframe, Tag):
+            continue
         src = iframe["src"]
         if "player" in src or any(ext in src for ext in ["mp4", "m3u8", "embed"]):
-            sources.add(urljoin(base_url, src))
+            sources.add(urljoin(base_url, str(src)))
 
     return list(sources)
 
@@ -609,6 +613,7 @@ async def search(query: str = "", links_to_scrap: int = 10, summaries: int = 5):
                 "summary": r["summary"],
                 "links": r.get("summary_links", []),
                 "videos": r.get("video_links", []),
+                "tags": r.get("tags", []),
             }
             for r in results
         ]
