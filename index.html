@@ -67,7 +67,9 @@
         :key="item.source_url || item.title || index"
       >
         <div class="card">
-          <video :src="item.video_url" controls preload="metadata"></video>
+          <template x-if="item.video_url">
+            <video :src="item.video_url" controls preload="metadata"></video>
+          </template>
           <h3 x-text="item.title"></h3>
           <p x-text="item.tags?.join(', ')"></p>
         </div>
