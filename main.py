@@ -37,7 +37,7 @@ LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 # === 🧠 MODELS ===
 class OpenCLIPEmbedder:
     def __init__(
-        self, model_name="ViT-B-32", pretrained="laion2b_s32b_b79k", device=None
+        self, model_name="ViT-B-32", pretrained="laion2b_s34b_b79k", device=None
     ):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model, _, _ = open_clip.create_model_and_transforms(
@@ -53,7 +53,7 @@ class OpenCLIPEmbedder:
         return features.cpu().numpy()[0]
 
 
-model_embed = OpenCLIPEmbedder()
+model_embed = OpenCLIPEmbedder(model_name="ViT-B-32", pretrained="laion2b_s34b_b79k")
 kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
 
 
@@ -397,7 +397,7 @@ async def process_url_async(url, query_embed):
     save_cache(cache_summary(url), result)
 
     point = PointStruct(
-        id=str(uuid.uuid5(uuid.NAMESPACE_URL, url)),
+        id=str(uuid.uuid5(uuid.NAMESPACE_URL, normalize_url(url))),
         vector=model_embed.encode(
             f"{meta['title']} {meta['description']} {text}"
         ).tolist(),
@@ -517,7 +517,11 @@ async def search(
 @app.get("/qdrant_search")
 async def qdrant_search(query: str, top_k: int = 10):
     vec = model_embed.encode(query).tolist()
-    results = qdrant.search("videos", query_vector=vec, limit=top_k)
+    results = sorted(
+        qdrant.search("videos", query_vector=vec, limit=top_k),
+        key=lambda r: r.score,
+        reverse=True,
+    )
     return JSONResponse(
         content=[
             {
