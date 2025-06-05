@@ -22,6 +22,7 @@ from playwright_scraper import fetch_rendered_html_playwright
 from embedder import OpenCLIPEmbedder
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
+from keybert import KeyBERT
 
 
 # App setup
@@ -31,6 +32,7 @@ qdrant.recreate_collection(
     collection_name="videos",
     vectors_config=VectorParams(size=512, distance=Distance.COSINE),
 )
+kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
 
 
 # Initialization
@@ -229,6 +231,18 @@ def safe_strip(value):
     return value.strip() if isinstance(value, str) else ""
 
 
+def auto_generate_tags_from_text(text, top_k=5):
+    keywords = kw_model.extract_keywords(
+        text,
+        keyphrase_ngram_range=(1, 3),
+        stop_words="english",
+        use_mmr=True,
+        diversity=0.7,
+        top_n=top_k,
+    )
+    return [kw for kw, _ in keywords]
+
+
 async def extract_metadata(html):
     soup = BeautifulSoup(html, "lxml")
     meta = {
@@ -384,7 +398,7 @@ async def process_url_async(url, session, query_embed):
                 payload={
                     "title": result["title"],
                     "description": result["description"],
-                    "tags": result.get("summary_links", []),
+                    "tags": auto_generate_tags_from_text(text),
                     "video_url": (
                         result["video_links"][0] if result["video_links"] else ""
                     ),

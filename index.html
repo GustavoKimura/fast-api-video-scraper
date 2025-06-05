@@ -1,130 +1,100 @@
-<html>
+<!DOCTYPE html>
+<html lang="en" x-data="searchApp()" x-init="init()">
   <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta charset="UTF-8" />
+    <title>Video Search</title>
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"
+    ></script>
     <style>
       body {
-        margin: 0;
-        padding: 16px;
         font-family: sans-serif;
         background: #000;
+        color: #fff;
+        margin: 0;
+        padding: 1rem;
       }
-      form {
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-        max-width: 400px;
-        width: 100%;
-        margin: 0 auto 16px auto;
-      }
-      input {
-        font-size: 16px;
-        padding: 8px;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      label {
-        font-size: 14px;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        color: white;
-      }
+      input,
       button {
-        font-size: 16px;
-        padding: 8px;
+        padding: 0.5rem;
+        font-size: 1rem;
+        width: 100%;
+        margin-bottom: 1rem;
       }
-      #o {
-        background: #1a1a1a;
-        color: #e0e0e0;
-        padding: 12px;
-        border-radius: 4px;
-        margin-top: 16px;
-        text-align: justify;
-        word-break: break-word;
-        overflow-wrap: break-word;
-        max-width: 100%;
-        box-sizing: border-box;
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 1rem;
       }
-      #o a {
-        color: #5ab4f0;
-        text-decoration: none;
-        word-break: break-word;
+      .card {
+        background: #111;
+        border-radius: 8px;
+        overflow: hidden;
+        padding: 0.5rem;
       }
-      #o a:hover {
-        color: #82cfff;
-        text-decoration: underline;
+      video {
+        width: 100%;
+        border-radius: 6px;
+        height: auto;
+        background: #000;
+      }
+      h3 {
+        font-size: 1rem;
+        margin: 0.5rem 0 0.25rem;
+      }
+      p {
+        font-size: 0.85rem;
+        color: #ccc;
+        margin: 0;
       }
     </style>
   </head>
+
   <body>
-    <form id="f">
-      <label for="q">Busca:</label>
-      <input
-        id="q"
-        type="text"
-        placeholder="Qualquer besteira aqui..."
-        required
-      />
-      <label for="l">Quantidade de links a processar (Ex. 10):</label>
-      <input
-        id="l"
-        type="number"
-        placeholder="Ex. 10"
-        value="10"
-        min="1"
-        required
-      />
-      <label for="s">Quantidade de resumos desejados (Ex. 5):</label>
-      <input
-        id="s"
-        type="number"
-        placeholder="Ex. 5"
-        value="5"
-        min="1"
-        required
-      />
-      <button>Buscar</button>
+    <form @submit.prevent="search">
+      <input x-model="query" placeholder="Search videos..." />
+      <button>Search</button>
     </form>
-    <div id="o">Os resultados da busca aparecerão aqui.</div>
+
+    <template x-if="loading">
+      <div>Loading results...</div>
+    </template>
+
+    <div class="grid" x-show="results.length > 0">
+      <template x-for="item in results" :key="item.video_url">
+        <div class="card">
+          <video :src="item.video_url" controls preload="metadata"></video>
+          <h3 x-text="item.title"></h3>
+          <p x-text="item.tags?.join(', ')"></p>
+        </div>
+      </template>
+    </div>
+
     <script>
-      const f = document.getElementById("f");
-      const q = document.getElementById("q");
-      const l = document.getElementById("l");
-      const s = document.getElementById("s");
-      const o = document.getElementById("o");
-      f.onsubmit = async (e) => {
-        e.preventDefault();
-        o.textContent = "Carregando...";
-        let query = encodeURIComponent(q.value);
-        let linksToScrap = parseInt(l.value);
-        let summaries = parseInt(s.value);
-        let result = await fetch(
-          `/search?query=${query}&links_to_scrap=${linksToScrap}&summaries=${summaries}`
-        );
-        let data = await result.json();
-        if (!Array.isArray(data) || data.length === 0) {
-          o.innerHTML = `<div>Nenhum resultado encontrado.</div>`;
-          return;
-        }
-        o.innerHTML = data
-          .map(
-            (item, idx) => `
-          <div style="margin-bottom:20px; border-bottom:1px solid #eee; padding-bottom:12px;">
-            <strong>${idx + 1}. ${item.title}</strong><br>
-            <div style="margin:8px 0;">${item.summary
-              .split("\\n")
-              .map((p) => `<p style="margin: 0 0 10px 0;">${p}</p>`)
-              .join("")}</div>
-            <div>Links:<br>
-              ${item.links
-                .map((link) => `<a href="${link}" target="_blank">${link}</a>`)
-                .join("<br>")}
-            </div>
-          </div>
-        `
-          )
-          .join("");
-      };
+      function searchApp() {
+        return {
+          query: "",
+          results: [],
+          loading: false,
+          init() {},
+          async search() {
+            this.loading = true;
+            this.results = [];
+            try {
+              const res = await fetch(
+                `/qdrant_search?query=${encodeURIComponent(this.query)}`
+              );
+              const data = await res.json();
+              this.results = data;
+            } catch (e) {
+              console.error("Search failed", e);
+            } finally {
+              this.loading = false;
+            }
+          },
+        };
+      }
     </script>
   </body>
 </html>
