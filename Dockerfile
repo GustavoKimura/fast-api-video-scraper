@@ -1,10 +1,11 @@
-FROM python:3.11-slim AS base
+FROM python:3.11-slim
+
+ENV PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget curl gnupg \
     libnss3 libgtk-3-0 libxss1 libasound2 \
     libxcomposite1 libxdamage1 libxrandr2 libgbm1 libegl1 \
-    ca-certificates \
+    ca-certificates wget curl gnupg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
