@@ -460,8 +460,8 @@ async def process_url_async(url, query_embed):
     text_hash = hashlib.md5(text.encode()).hexdigest()
     if isinstance(summary_cache, dict) and summary_cache.get("hash") == text_hash:
         return summary_cache
-
     meta = await extract_metadata(html)
+    tags = auto_generate_tags_from_text(f"{text.strip()} {meta['title']}", top_k=10)
     result = {
         "url": url,
         "summary": text.strip(),
@@ -472,9 +472,7 @@ async def process_url_async(url, query_embed):
         "description": meta["description"],
         "author": meta["author"],
         "language": "en",
-        "tags": auto_generate_tags_from_text(
-            f"{text.strip()} {meta['title']}", top_k=10
-        ),
+        "tags": tags,
     }
     save_cache(cache_summary(url), result)
 
@@ -486,7 +484,7 @@ async def process_url_async(url, query_embed):
         payload={
             "title": meta["title"],
             "description": meta["description"],
-            "tags": auto_generate_tags_from_text(text, top_k=10),
+            "tags": tags,
             "video_url": (result["video_links"][0] if result["video_links"] else ""),
             "source_url": url,
         },
