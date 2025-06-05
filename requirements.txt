@@ -1,17 +1,26 @@
-aiohttp
-beautifulsoup4
-deep_translator
-fastapi
-keybert
-langdetect
-lxml
-numpy
-open-clip-torch
-playwright
-qdrant-client
-readability-lxml
-sentence-transformers
-tldextract
-torch
-trafilatura
-uvicorn[standard]
+# Core async and HTTP
+aiohttp>=3.9.5
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+
+# Crawling / rendering
+playwright>=1.44.0
+
+# Parsing
+beautifulsoup4>=4.12.3
+lxml>=5.2.1
+readability-lxml>=0.8.1
+trafilatura>=1.6.1
+tldextract>=5.1.2
+
+# NLP / embedding
+torch>=2.2.2
+open-clip-torch>=2.24.0
+sentence-transformers>=2.7.0
+langdetect>=1.0.9
+deep_translator>=1.11.4
+keybert>=0.8.3
+numpy>=1.26.4
+
+# Vector DB
+qdrant-client>=1.8.0
