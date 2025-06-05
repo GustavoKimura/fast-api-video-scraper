@@ -1,81 +1,133 @@
-import subprocess, sys, webbrowser, time, os
+import subprocess
+import sys
+import time
+import webbrowser
+import requests
+from qdrant_client import QdrantClient
+
+# === ⚙️ SETTINGS ===
+DEFAULT_RETRIES = 20
+DEFAULT_DELAY = 2
 
 
+# === 🧾 LOGGING ===
+def log(status: str, message: str, end="\n"):
+    icons = {
+        "info": "ℹ️ ",
+        "success": "✅",
+        "error": "❌",
+        "action": "🔧",
+        "waiting": "⏳",
+        "build": "🚀",
+    }
+    print(f"\r{icons.get(status, '❔')} {message}", end=end, flush=True)
+
+
+# === 🐳 DOCKER ===
 def check_docker():
+    log("action", "Checking Docker & Compose...", end="")
     try:
-        subprocess.run(["docker", "--version"], stdout=subprocess.DEVNULL, check=True)
+        subprocess.run(["docker", "--version"], check=True, stdout=subprocess.DEVNULL)
         subprocess.run(
-            ["docker", "compose", "version"], stdout=subprocess.DEVNULL, check=True
+            ["docker", "compose", "version"], check=True, stdout=subprocess.DEVNULL
         )
+        log("success", "Docker and Compose available.")
     except subprocess.CalledProcessError:
-        print("[✘] Docker or Compose not installed.")
+        log("error", "Docker or Docker Compose not found.")
         sys.exit(1)
 
 
-def run_compose(project_dir, name=""):
-    print(f"[*] Launching services in {project_dir}...")
+def run_compose(path: str, name: str):
+    base_msg = f"{name} → launching"
+    log("build", base_msg, end="")
+
     try:
-        subprocess.run(
+        process = subprocess.Popen(
             ["docker", "compose", "up", "--build", "-d"],
-            cwd=project_dir,
-            check=True,
+            cwd=path,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        print(f"[✓] {name or project_dir} started.")
-    except subprocess.CalledProcessError as e:
-        print(f"[✘] Failed to start {name or project_dir}: {e}")
+
+        dots = ""
+        while process.poll() is None:
+            dots += "."
+            print(f"\r🚀 {base_msg}{dots}", end="", flush=True)
+            time.sleep(1)
+
+        if process.returncode == 0:
+            print("\r" + " " * (len(base_msg) + len(dots) + 3), end="\r")
+            log("success", f"{name} is up and running.")
+        else:
+            log("error", f"{name} failed to launch (exit {process.returncode}).")
+            sys.exit(1)
+    except Exception as e:
+        log("error", f"Exception during {name} launch: {e}")
         sys.exit(1)
 
 
-from qdrant_client import QdrantClient
+# === ⏳ WAITERS ===
+def wait_for_service(
+    host: str, port: int, retries=DEFAULT_RETRIES, delay=DEFAULT_DELAY
+):
+    url = f"http://{host}:{port}"
+    msg = f"Waiting for {url}"
+    log("waiting", msg, end="")
 
-
-def wait_for_qdrant(max_retries=10, delay=2):
-    for attempt in range(max_retries):
+    dots = ""
+    for _ in range(retries):
         try:
-            client = QdrantClient(host=os.getenv("QDRANT_HOST", "localhost"), port=6333)
-            client.get_collections()
-            print("[✓] Qdrant is ready.")
-            return client
-        except Exception as e:
-            print(f"[{attempt+1}/{max_retries}] Waiting for Qdrant... {e}")
-            time.sleep(delay)
-    raise RuntimeError("Qdrant did not become ready in time.")
-
-
-def wait_for_backend(host="http://localhost:8000", timeout=30):
-    import requests
-
-    print("[*] Waiting for backend to be available...", end="", flush=True)
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            r = requests.get(host, timeout=2)
-            if r.status_code == 200:
-                print(" ready!")
+            if requests.get(url, timeout=2).status_code < 500:
+                print("\r" + " " * (len(msg) + len(dots) + 4), end="\r")
+                log("success", f"{url} is ready.")
                 return
         except:
             pass
-        print(".", end="", flush=True)
-        time.sleep(1)
-    print("\n[✘] Backend not responding in time.")
+
+        dots += "."
+        print(f"\r⏳ {msg}{dots}", end="", flush=True)
+        time.sleep(delay)
+
+    log("error", f"Timeout waiting for {url}")
     sys.exit(1)
 
 
-def open_browser():
-    print("[*] Opening UI in browser...")
-    webbrowser.open("http://localhost:8000")
+def wait_for_qdrant(retries=DEFAULT_RETRIES, delay=DEFAULT_DELAY):
+    msg = "Waiting for Qdrant (port 6333)"
+    log("waiting", msg, end="")
+
+    dots = ""
+    for _ in range(retries):
+        try:
+            QdrantClient(host="localhost", port=6333).get_collections()
+            print("\r" + " " * (len(msg) + len(dots) + 4), end="\r")
+            log("success", "Qdrant is ready.")
+            return
+        except:
+            dots += "."
+            print(f"\r⏳ {msg}{dots}", end="", flush=True)
+            time.sleep(delay)
+
+    log("error", "Qdrant did not become ready.")
+    sys.exit(1)
 
 
+# === 🌐 BROWSER ===
+def open_browser(url="http://localhost:8000"):
+    log("action", f"Opening browser at {url}")
+    webbrowser.open(url)
+
+
+# === 🚀 MAIN ===
 def main():
+    log("info", "=== 🚀 FastAPI Scraper Bootstrap ===")
     check_docker()
-    run_compose("searxng", name="SearXNG")
-    run_compose(".", name="Main Search Engine")
+    run_compose("searxng", "SearXNG")
+    run_compose(".", "Search Engine Backend")
     wait_for_qdrant()
-    wait_for_backend()
+    wait_for_service("localhost", 8000)
     open_browser()
-    print("[✓] All systems operational.")
+    log("success", "🎉 All systems operational!")
 
 
 if __name__ == "__main__":

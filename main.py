@@ -57,7 +57,7 @@ model_embed = OpenCLIPEmbedder(model_name="ViT-B-32", pretrained="laion2b_s34b_b
 kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
 
 
-# === 🧠 Qdrant Indexer ===
+# === 🎯 INDEXER ===
 class QdrantIndexer:
     def __init__(self, client, collection="videos", batch_size=50):
         self.client = client
@@ -88,14 +88,6 @@ class QdrantIndexer:
                     collection_name=self.collection, points=self.buffer.copy()
                 )
                 self.buffer.clear()
-
-
-# === 🔍 QDRANT SETUP ===
-qdrant = QdrantClient(host="localhost", port=6333)
-qdrant.recreate_collection(
-    "videos", vectors_config=VectorParams(size=512, distance=Distance.COSINE)
-)
-indexer = QdrantIndexer(qdrant)
 
 
 # === 🔧 UTILITIES ===
@@ -472,14 +464,31 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
 # === 🌐 FASTAPI ROUTES ===
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global qdrant, indexer
+
     async def auto_flush_loop():
         while True:
             await asyncio.sleep(10)
             await indexer.flush()
 
+    for attempt in range(20):
+        try:
+            qdrant = QdrantClient(host="qdrant", port=6333)
+            qdrant.get_collections()
+            break
+        except Exception as e:
+            print(f"[{attempt+1}/20] Waiting for Qdrant: {e}")
+            await asyncio.sleep(2)
+    else:
+        raise RuntimeError("Qdrant did not become available.")
+
+    qdrant.recreate_collection(
+        "videos", vectors_config=VectorParams(size=512, distance=Distance.COSINE)
+    )
+    indexer = QdrantIndexer(qdrant)
+
     flush_task = asyncio.create_task(auto_flush_loop())
     yield
-
     flush_task.cancel()
     try:
         await flush_task
