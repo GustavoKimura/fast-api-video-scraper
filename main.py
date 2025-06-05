@@ -4,13 +4,14 @@ import json
 import os
 import random
 import time
-from urllib.parse import urljoin, urlparse, urlunparse
+import open_clip
+import torch
 import uuid
-
 import aiohttp
-import numpy as np
 import tldextract
 import trafilatura
+
+from urllib.parse import urlparse, urlunparse
 from aiohttp import ClientTimeout
 from bs4 import BeautifulSoup, Tag
 from deep_translator import GoogleTranslator
@@ -18,11 +19,74 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from langdetect import DetectorFactory, detect
 from readability import Document
-from playwright_scraper import fetch_rendered_html_playwright
-from embedder import OpenCLIPEmbedder
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from keybert import KeyBERT
+from playwright.async_api import async_playwright
+from urllib.parse import urlparse
+
+
+class OpenCLIPEmbedder:
+    def __init__(
+        self, model_name="ViT-B-32", pretrained="laion2b_s32b_b79k", device=None
+    ):
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.model, _, _ = open_clip.create_model_and_transforms(
+            model_name, pretrained=pretrained
+        )
+        self.model = self.model.to(self.device)
+        self.tokenizer = open_clip.get_tokenizer(model_name)
+
+    def encode(self, text: str):
+        tokens = self.tokenizer(text).to(self.device)
+        with torch.no_grad():
+            features = self.model.encode_text(tokens).float()
+        return features.cpu().numpy()[0]
+
+
+async def fetch_rendered_html_playwright(url: str, timeout: int = 15000) -> str:
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-web-security",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                ],
+            )
+
+            domain = urlparse(url).netloc.replace("www.", "")
+
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                java_script_enabled=True,
+                viewport={"width": 1280, "height": 720},
+            )
+
+            await context.add_cookies(
+                [
+                    {"name": "RTA", "value": "1", "domain": f".{domain}", "path": "/"},
+                    {
+                        "name": "age_verified",
+                        "value": "1",
+                        "domain": f".{domain}",
+                        "path": "/",
+                    },
+                ]
+            )
+
+            page = await context.new_page()
+            await page.goto(url, timeout=timeout)
+            await page.wait_for_timeout(3000)
+
+            html = await page.content()
+            await browser.close()
+            return html
+    except Exception as e:
+        print(f"[Playwright Error] {url}: {e}")
+        return ""
 
 
 # App setup
