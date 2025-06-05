@@ -394,7 +394,7 @@ def extract_deep_links(html: str, base_url: str) -> list[str]:
     return list(urls)[:10]
 
 
-async def process_url_async(url, query_embed):
+async def process_url_async(url, query_embed, summary=True):
     if not is_valid_link(url):
         return None
     html = await fetch_rendered_html_playwright(url)
@@ -415,6 +415,22 @@ async def process_url_async(url, query_embed):
             html = deep_html
             url = deep_url
             break
+
+    meta = await extract_metadata(html)
+
+    video_links = extract_video_links_qdrant(query_embed)
+
+    if not summary:
+        return {
+            "url": url,
+            "summary": "",
+            "summary_links": [],
+            "video_links": video_links,
+            "title": meta["title"],
+            "description": meta["description"],
+            "author": meta["author"],
+            "language": "en",
+        }
 
     text = filter_text(extract_content(html))
     if len(text) < 200:
@@ -439,18 +455,18 @@ async def process_url_async(url, query_embed):
     if isinstance(summary_cache, dict) and summary_cache.get("hash") == text_hash:
         return summary_cache
 
-    meta = await extract_metadata(html)
     result = {
         "url": url,
         "summary": text.strip(),
         "summary_links": extract_relevant_links_qdrant(query_embed),
-        "video_links": extract_video_links_qdrant(query_embed),
+        "video_links": video_links,
         "hash": text_hash,
         "title": meta["title"],
         "description": meta["description"],
         "author": meta["author"],
         "language": "en",
     }
+
     save_cache(cache_summary(url), result)
 
     point = PointStruct(
@@ -494,7 +510,7 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
     async def worker(url):
         async with sem:
             try:
-                return await process_url_async(url, query_embed)
+                return await process_url_async(url, query_embed, summary=False)
             except:
                 return None
 
