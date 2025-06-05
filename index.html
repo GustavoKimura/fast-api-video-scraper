@@ -213,15 +213,16 @@
         :key="item.source_url || item.title || index"
       >
         <article class="card" tabindex="0" aria-label="Search result item">
-          <template x-if="item.video_url">
-            <video
-              :src="item.video_url"
-              controls
-              preload="metadata"
-              playsinline
-              muted
-              aria-label="Video preview"
-            ></video>
+          <template x-if="item.videos && item.videos.length > 0">
+            <template x-for="videoUrl in item.videos" :key="videoUrl">
+              <video
+                :src="videoUrl"
+                controls
+                preload="metadata"
+                playsinline
+                muted
+              ></video>
+            </template>
           </template>
           <h3 x-text="item.title"></h3>
           <p x-text="item.tags?.join(', ')"></p>
