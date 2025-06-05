@@ -88,7 +88,9 @@
             this.results = [];
             try {
               const res = await fetch(
-                `/qdrant_search?query=${encodeURIComponent(this.query)}`
+                `/search?query=${encodeURIComponent(
+                  this.query
+                )}&links_to_scrap=10&summaries=5`
               );
               const data = await res.json();
               this.results = data;
