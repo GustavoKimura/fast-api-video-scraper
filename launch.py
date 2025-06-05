@@ -28,6 +28,22 @@ def run_compose(project_dir, name=""):
         sys.exit(1)
 
 
+from qdrant_client import QdrantClient
+
+
+def wait_for_qdrant(max_retries=10, delay=2):
+    for attempt in range(max_retries):
+        try:
+            client = QdrantClient(host=os.getenv("QDRANT_HOST", "localhost"), port=6333)
+            client.get_collections()
+            print("[✓] Qdrant is ready.")
+            return client
+        except Exception as e:
+            print(f"[{attempt+1}/{max_retries}] Waiting for Qdrant... {e}")
+            time.sleep(delay)
+    raise RuntimeError("Qdrant did not become ready in time.")
+
+
 def wait_for_backend(host="http://localhost:8000", timeout=30):
     import requests
 
@@ -56,6 +72,7 @@ def main():
     check_docker()
     run_compose("searxng", name="SearXNG")
     run_compose(".", name="Main Search Engine")
+    wait_for_qdrant()
     wait_for_backend()
     open_browser()
     print("[✓] All systems operational.")
