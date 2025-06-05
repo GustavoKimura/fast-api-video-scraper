@@ -17,7 +17,9 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from langdetect import DetectorFactory, detect
 from readability import Document
-from sentence_transformers import SentenceTransformer
+from playwright_scraper import fetch_rendered_html_playwright
+from embedder import OpenCLIPEmbedder
+
 
 # App setup
 app = FastAPI()
@@ -68,7 +70,7 @@ LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
 # Clients & models
 timeout_obj = ClientTimeout(total=5)
-model_embed = SentenceTransformer("intfloat/e5-base-v2")
+model_embed = OpenCLIPEmbedder()
 
 
 def detect_language(text):
@@ -311,10 +313,9 @@ async def search_engine_async(query, link_count):
                     if link and is_valid_link(link):
                         title = result.get("title", "")
                         snippet = result.get("content", "")
-                        score = cosine_similarity(
-                            model_embed.encode([query])[0],
-                            model_embed.encode([f"passage: {title} {snippet}"])[0],
-                        )
+                        query_embed = model_embed.encode(query)
+                        text_embed = model_embed.encode(f"{title} {snippet}")
+                        score = cosine_similarity(query_embed, text_embed)
                         ranked_links.append((score, link))
         ranked_links.sort(reverse=True)
         return [link for _, link in ranked_links[:link_count]]
@@ -334,9 +335,8 @@ def extract_relevant_links_from_html(html, base_url, query_embed):
             url = urljoin(base_url, str(href))
             if is_valid_link(url) and url not in seen and text:
                 seen.add(url)
-                sim = cosine_similarity(
-                    query_embed, model_embed.encode([f"passage: {text}"])[0]
-                )
+                text_embed = model_embed.encode(text)
+                sim = cosine_similarity(query_embed, text_embed)
                 links_with_scores.append((sim, url))
 
     if links_with_scores:
@@ -388,10 +388,9 @@ def extract_video_links_from_html(html, base_url, query_embed):
             )
             score = 0.0
 
-            if text:
-                score = cosine_similarity(
-                    query_embed, model_embed.encode([f"passage: {text}"])[0]
-                )
+            if text and isinstance(text, str):
+                text_embeded = model_embed.encode(text)
+                score = cosine_similarity(query_embed, text_embeded)
                 if is_video:
                     score += 0.3
             elif is_video:
@@ -407,7 +406,7 @@ async def process_url_async(url, session, query_embed):
     if not is_valid_link(url):
         return None
 
-    html = await download_html_async(url, session)
+    html = await fetch_rendered_html_playwright(url)
     if not html:
         return None
 
@@ -462,7 +461,7 @@ async def process_url_async(url, session, query_embed):
 
 
 async def advanced_search_async(query, links_to_scrap, max_sites):
-    query_embed = model_embed.encode([f"query: {query}"])[0]
+    query_embed = model_embed.encode(query)
     collected = set()
     all_links = []
     results = []
@@ -510,11 +509,9 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
                 tasks.remove(d)
                 r = d.result()
                 if r:
-                    summary_embed = model_embed.encode([f"passage: {r['summary']}"])[0]
+                    summary_embed = model_embed.encode(r["summary"])
                     title_embed = (
-                        model_embed.encode([f"passage: {r['title']}"])[0]
-                        if r["title"]
-                        else query_embed
+                        model_embed.encode(r["title"]) if r["title"] else query_embed
                     )
                     r["similarity"] = 0.7 * cosine_similarity(
                         query_embed, summary_embed
