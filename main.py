@@ -1,6 +1,6 @@
 # === 📦 IMPORTS ===
-import os, json, time, uuid, random, hashlib, asyncio
-from urllib.parse import urlparse, urlunparse
+import os, json, time, uuid, random, hashlib, asyncio, re
+from urllib.parse import urlparse, urlunparse, urljoin
 
 import torch, open_clip, aiohttp, tldextract, trafilatura
 from fastapi import FastAPI
@@ -21,7 +21,7 @@ DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 MAX_PARALLEL_TASKS = os.cpu_count() or 4
 CACHE_EXPIRATION = 10
-SEARXNG_BASE_URL = "http://localhost:8888/search"
+SEARXNG_BASE_URL = "http://searxng:8080/search"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -29,8 +29,36 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
 ]
 
-BLOCKED_DOMAINS = {...}
-BLOCKED_KEYWORDS = [...]
+BLOCKED_DOMAINS = {
+    "facebook.com",
+    "twitter.com",
+    "instagram.com",
+    "youtube.com",
+    "linkedin.com",
+    "pinterest.com",
+    "tiktok.com",
+    "quora.com",
+    "fandom.com",
+    "wikia.org",
+    "wikihow.com",
+    "stackoverflow.com",
+    "github.com",
+    "reuters.com",
+    "bloomberg.com",
+    "marketwatch.com",
+}
+BLOCKED_KEYWORDS = [
+    "quora",
+    "board",
+    "discussion",
+    "signup",
+    "login",
+    "register",
+    "comment",
+    "thread",
+    "showthread",
+    "archive",
+]
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
 
@@ -344,12 +372,47 @@ def extract_video_links_qdrant(query_embed, top_k=5):
     ]
 
 
+def extract_deep_links(html: str, base_url: str) -> list[str]:
+    soup = BeautifulSoup(html, "lxml")
+    urls = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        full_url = urljoin(base_url, href)
+
+        if not is_valid_link(full_url):
+            continue
+
+        if any(
+            k in full_url.lower()
+            for k in ["/watch", "/view", "/video", "viewkey=", ".mp4", ".m3u8"]
+        ):
+            urls.add(full_url)
+
+    return list(urls)[:10]
+
+
 async def process_url_async(url, query_embed):
     if not is_valid_link(url):
         return None
     html = await fetch_rendered_html_playwright(url)
     if not html:
         return None
+
+    deep_links = extract_deep_links(html, url)
+
+    for deep_url in deep_links[:5]:
+        deep_html = await fetch_rendered_html_playwright(deep_url)
+        if not deep_html:
+            continue
+
+        if (
+            re.search(r"\.(mp4|webm|m3u8|mov)", deep_html, re.IGNORECASE)
+            or "<video" in deep_html
+        ):
+            html = deep_html
+            url = deep_url
+            break
 
     text = filter_text(extract_content(html))
     if len(text) < 200:
@@ -505,9 +568,7 @@ def index():
 
 
 @app.get("/search")
-async def search(
-    query: str = "batata inglesa", links_to_scrap: int = 10, summaries: int = 5
-):
+async def search(query: str = "", links_to_scrap: int = 10, summaries: int = 5):
     clean_expired_cache()
     results = await advanced_search_async(query, links_to_scrap, summaries)
     return JSONResponse(
@@ -544,3 +605,11 @@ async def qdrant_search(query: str, top_k: int = 10):
             for r in results
         ]
     )
+
+
+@app.get("/debug_search")
+async def debug_search(
+    query: str = "test", links_to_scrap: int = 10, summaries: int = 5
+):
+    results = await search_engine_async(query, links_to_scrap)
+    return JSONResponse(content={"fetched_links": results})
