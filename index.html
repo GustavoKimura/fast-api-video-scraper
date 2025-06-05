@@ -7,42 +7,50 @@
       defer
       src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"
     ></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
-      /* Base Reset & Typography */
       body {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
           Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
         background: #000;
         color: #fff;
         margin: 0;
-        padding: 1rem;
+        padding: 0.75rem 1rem;
         line-height: 1.4;
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
       }
 
-      /* Form */
       form {
-        max-width: 600px;
-        margin: 0 auto 1.5rem;
+        max-width: 100%;
+        margin: 0 auto 1.25rem;
         display: flex;
         flex-direction: column;
-        gap: 0.75rem;
+        gap: 0.5rem;
+      }
+      input,
+      button {
+        padding: 0.6rem 0.75rem;
+        font-size: 1.1rem;
+        width: 100%;
+        border: none;
+        border-radius: 8px;
+        box-sizing: border-box;
       }
 
       input,
       button {
-        padding: 0.75rem 1rem;
-        font-size: 1rem;
+        padding: 0.6rem 0.75rem;
+        font-size: 1.1rem;
         width: 100%;
         border: none;
-        border-radius: 6px;
+        border-radius: 8px;
+        box-sizing: border-box;
       }
 
       input {
         background: #111;
         color: #eee;
-        box-sizing: border-box;
         outline-offset: 2px;
         outline-color: #5ab4f0;
       }
@@ -54,7 +62,7 @@
       button {
         background: #5ab4f0;
         color: #000;
-        font-weight: 600;
+        font-weight: 700;
         cursor: pointer;
         transition: background-color 0.3s ease;
       }
@@ -65,29 +73,26 @@
         outline: none;
       }
 
-      /* Loading Indicator */
       [x-cloak] {
         display: none !important;
       }
 
-      /* Grid Container */
       .grid {
         display: grid;
+        grid-template-columns: 1fr;
         gap: 1rem;
-        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-        max-width: 1200px;
+        max-width: 100%;
         margin: 0 auto;
       }
 
-      /* Card */
       .card {
         background: #111;
-        border-radius: 10px;
+        border-radius: 12px;
         overflow: hidden;
         padding: 0.75rem;
         display: flex;
         flex-direction: column;
-        box-shadow: 0 0 12px rgba(90, 180, 240, 0.2);
+        box-shadow: 0 0 10px rgba(90, 180, 240, 0.15);
         transition: box-shadow 0.3s ease;
       }
 
@@ -96,82 +101,98 @@
         box-shadow: 0 0 20px rgba(130, 207, 255, 0.6);
       }
 
-      /* Video */
       video {
         width: 100%;
         height: auto;
-        border-radius: 8px;
+        border-radius: 10px;
         background: #000;
         margin-bottom: 0.75rem;
+        max-height: 220px;
+        object-fit: contain;
       }
 
-      /* Titles & Tags */
       h3 {
         font-size: 1.1rem;
-        margin: 0 0 0.4rem 0;
+        margin: 0 0 0.3rem 0;
         color: #cce6ff;
         word-break: break-word;
       }
 
       p {
-        font-size: 0.85rem;
+        font-size: 0.9rem;
         color: #aaa;
         margin: 0;
         flex-grow: 1;
         word-break: break-word;
       }
 
-      /* Responsive tweaks */
-      @media (max-width: 768px) {
-        body {
-          padding: 0.75rem;
-        }
+      @media (min-width: 600px) {
         form {
-          max-width: 100%;
+          max-width: 600px;
         }
+
         .grid {
-          grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-          gap: 0.75rem;
+          grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+          max-width: 1200px;
         }
-        h3 {
-          font-size: 1rem;
-        }
-        p {
-          font-size: 0.8rem;
+
+        video {
+          max-height: 260px;
         }
       }
 
-      @media (max-width: 480px) {
-        form {
-          gap: 0.5rem;
-        }
-        input,
-        button {
-          font-size: 0.95rem;
-          padding: 0.65rem 0.8rem;
-        }
-        .grid {
-          grid-template-columns: 1fr;
-          gap: 0.5rem;
-        }
-        h3 {
-          font-size: 0.95rem;
-        }
-        p {
-          font-size: 0.75rem;
+      @media (min-width: 900px) {
+        video {
+          max-height: 300px;
         }
       }
     </style>
   </head>
 
   <body>
-    <form @submit.prevent="search">
-      <input x-model="query" placeholder="Search videos..." />
+    <form @submit.prevent="search" role="search" aria-label="Video search form">
+      <input
+        x-model="query"
+        placeholder="Search videos..."
+        aria-label="Search videos"
+        type="search"
+        required
+        autocomplete="off"
+      />
+
+      <input
+        x-model.number="linksToScrap"
+        type="number"
+        min="1"
+        max="100"
+        step="1"
+        placeholder="Number of links to scrap (e.g. 10)"
+        aria-label="Number of links to scrap"
+        required
+      />
+
+      <input
+        x-model.number="summaries"
+        type="number"
+        min="1"
+        max="50"
+        step="1"
+        placeholder="Number of summaries (e.g. 5)"
+        aria-label="Number of summaries"
+        required
+      />
+
       <button type="submit">Search</button>
     </form>
 
     <template x-if="loading">
-      <div role="status" aria-live="polite">Loading results...</div>
+      <div
+        role="status"
+        aria-live="polite"
+        style="text-align: center; margin: 1rem 0"
+      >
+        Loading results...
+      </div>
     </template>
 
     <div class="grid" x-show="results.length > 0" x-cloak>
@@ -179,18 +200,20 @@
         x-for="(item, index) in results"
         :key="item.source_url || item.title || index"
       >
-        <div class="card" tabindex="0">
+        <article class="card" tabindex="0" aria-label="Search result item">
           <template x-if="item.video_url">
             <video
               :src="item.video_url"
               controls
               preload="metadata"
               playsinline
+              muted
+              aria-label="Video preview"
             ></video>
           </template>
           <h3 x-text="item.title"></h3>
           <p x-text="item.tags?.join(', ')"></p>
-        </div>
+        </article>
       </template>
     </div>
 
@@ -198,6 +221,8 @@
       function searchApp() {
         return {
           query: "",
+          linksToScrap: 10,
+          summaries: 5,
           results: [],
           loading: false,
           init() {},
@@ -212,7 +237,9 @@
               const res = await fetch(
                 `/search?query=${encodeURIComponent(
                   this.query
-                )}&links_to_scrap=10&summaries=5`
+                )}&links_to_scrap=${this.linksToScrap}&summaries=${
+                  this.summaries
+                }`
               );
               const data = await res.json();
               this.results = data;
@@ -227,3 +254,4 @@
     </script>
   </body>
 </html>
+
