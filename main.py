@@ -5,6 +5,7 @@ from urllib.parse import urlparse, urlunparse
 import torch, open_clip, aiohttp, tldextract, trafilatura
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
+from contextlib import asynccontextmanager
 from bs4 import BeautifulSoup, Tag
 from readability import Document
 from langdetect import DetectorFactory, detect
@@ -16,7 +17,6 @@ from keybert import KeyBERT
 from playwright.async_api import async_playwright
 
 # === ⚙️ CONFIGURATION ===
-app = FastAPI()
 DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 MAX_PARALLEL_TASKS = os.cpu_count() or 4
@@ -56,11 +56,38 @@ class OpenCLIPEmbedder:
 model_embed = OpenCLIPEmbedder()
 kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
 
+
+# === 🧠 Qdrant Indexer ===
+class QdrantIndexer:
+    def __init__(self, client, collection="videos", batch_size=50):
+        self.client = client
+        self.collection = collection
+        self.batch_size = batch_size
+        self.lock = asyncio.Lock()
+        self.buffer: list[PointStruct] = []
+
+    async def add_point(self, point: PointStruct):
+        async with self.lock:
+            self.buffer.append(point)
+            if len(self.buffer) >= self.batch_size:
+                await self.flush()
+
+    async def flush(self):
+        async with self.lock:
+            if self.buffer:
+                print(f"[Indexer] Flushing {len(self.buffer)} items to Qdrant...")
+                self.client.upsert(
+                    collection_name=self.collection, points=self.buffer.copy()
+                )
+                self.buffer.clear()
+
+
 # === 🔍 QDRANT SETUP ===
 qdrant = QdrantClient(host="localhost", port=6333)
 qdrant.recreate_collection(
     "videos", vectors_config=VectorParams(size=512, distance=Distance.COSINE)
 )
+indexer = QdrantIndexer(qdrant)
 
 
 # === 🔧 UTILITIES ===
@@ -361,25 +388,20 @@ async def process_url_async(url, query_embed):
     }
     save_cache(cache_summary(url), result)
 
-    vector = model_embed.encode(f"{meta['title']} {meta['description']} {text}")
-    qdrant.upsert(
-        "videos",
-        [
-            PointStruct(
-                id=str(uuid.uuid5(uuid.NAMESPACE_URL, url)),
-                vector=vector.tolist(),
-                payload={
-                    "title": meta["title"],
-                    "description": meta["description"],
-                    "tags": auto_generate_tags_from_text(text),
-                    "video_url": (
-                        result["video_links"][0] if result["video_links"] else ""
-                    ),
-                    "source_url": url,
-                },
-            )
-        ],
+    point = PointStruct(
+        id=str(uuid.uuid5(uuid.NAMESPACE_URL, url)),
+        vector=model_embed.encode(
+            f"{meta['title']} {meta['description']} {text}"
+        ).tolist(),
+        payload={
+            "title": meta["title"],
+            "description": meta["description"],
+            "tags": auto_generate_tags_from_text(text),
+            "video_url": (result["video_links"][0] if result["video_links"] else ""),
+            "source_url": url,
+        },
     )
+    await indexer.add_point(point)
     return result
 
 
@@ -434,10 +456,32 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
             if r := d.result():
                 results.append(r)
 
+    await indexer.flush()
+
     return results
 
 
 # === 🌐 FASTAPI ROUTES ===
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    async def auto_flush_loop():
+        while True:
+            await asyncio.sleep(10)
+            await indexer.flush()
+
+    flush_task = asyncio.create_task(auto_flush_loop())
+    yield
+
+    flush_task.cancel()
+    try:
+        await flush_task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(lifespan=lifespan)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return open("index.html", encoding="utf-8").read()

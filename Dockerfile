@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY . .
 
-RUN apt-get update && apt-get install -y ffmpeg git && \
+RUN apt-get update && apt-get install -y git && \
     pip install --upgrade pip && \
     pip install -r requirements.txt && \
     playwright install --with-deps
