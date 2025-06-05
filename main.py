@@ -68,6 +68,14 @@ class QdrantIndexer:
 
     async def add_point(self, point: PointStruct):
         async with self.lock:
+            try:
+                self.client.delete(
+                    collection_name=self.collection,
+                    points_selector={"points": [point.id]},
+                )
+            except Exception as e:
+                print(f"[Indexer] Failed to delete old point {point.id}: {e}")
+
             self.buffer.append(point)
             if len(self.buffer) >= self.batch_size:
                 await self.flush()
