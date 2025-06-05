@@ -394,11 +394,36 @@ def extract_deep_links(html: str, base_url: str) -> list[str]:
     return list(urls)[:10]
 
 
+def extract_video_sources(html, base_url):
+    soup = BeautifulSoup(html, "lxml")
+    sources = set()
+
+    for tag in soup.find_all(["video", "source"]):
+        src = tag.get("src") or tag.get("data-src")
+        if src:
+            full_url = urljoin(base_url, src)
+            if any(
+                full_url.endswith(ext) for ext in [".mp4", ".webm", ".m3u8", ".mov"]
+            ):
+                sources.add(full_url)
+
+    for iframe in soup.find_all("iframe", src=True):
+        src = iframe["src"]
+        if "player" in src or any(ext in src for ext in ["mp4", "m3u8", "embed"]):
+            sources.add(urljoin(base_url, src))
+
+    return list(sources)
+
+
 async def process_url_async(url, query_embed):
     if not is_valid_link(url):
         return None
     html = await fetch_rendered_html_playwright(url)
-    if not html:
+    if (
+        not html
+        or "Just a moment..." in html
+        or "checking your browser" in html.lower()
+    ):
         return None
 
     deep_links = extract_deep_links(html, url)
@@ -442,10 +467,9 @@ async def process_url_async(url, query_embed):
     meta = await extract_metadata(html)
     result = {
         "url": url,
-        # "summary": text.strip(),
-        "summary": "",
+        "summary": text.strip(),
         "summary_links": extract_relevant_links_qdrant(query_embed),
-        "video_links": extract_video_links_qdrant(query_embed),
+        "video_links": extract_video_sources(html, url),
         "hash": text_hash,
         "title": meta["title"],
         "description": meta["description"],
@@ -573,7 +597,11 @@ def index():
 @app.get("/search")
 async def search(query: str = "", links_to_scrap: int = 10, summaries: int = 5):
     clean_expired_cache()
-    results = await advanced_search_async(query, links_to_scrap, summaries)
+    results = [
+        r
+        for r in (await advanced_search_async(query, links_to_scrap, summaries))
+        if r.get("video_links")
+    ]
     return JSONResponse(
         content=[
             {
