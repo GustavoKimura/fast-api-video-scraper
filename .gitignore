@@ -70,7 +70,7 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Local dev
+# Local
 *.log
 cache
 results.json
@@ -79,6 +79,7 @@ results.md
 searxng/*
 !/searxng/docker-compose.yml
 !/searxng/settings.yml
+qdrant_data/
 
 # OS files
 .DS_Store

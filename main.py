@@ -4,7 +4,8 @@ import json
 import os
 import random
 import time
-from urllib.parse import urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
+import uuid
 
 import aiohttp
 import numpy as np
@@ -19,10 +20,18 @@ from langdetect import DetectorFactory, detect
 from readability import Document
 from playwright_scraper import fetch_rendered_html_playwright
 from embedder import OpenCLIPEmbedder
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
 
 
 # App setup
 app = FastAPI()
+qdrant = QdrantClient(host="localhost", port=6333)
+qdrant.recreate_collection(
+    collection_name="videos",
+    vectors_config=VectorParams(size=512, distance=Distance.COSINE),
+)
+
 
 # Initialization
 DetectorFactory.seed = 0
@@ -261,39 +270,6 @@ def filter_text(text):
     )
 
 
-async def download_html_async(url, session, lang="en"):
-    cached = read_cache_html(url)
-    if cached:
-        return cached
-
-    headers = {
-        "User-Agent": get_user_agent(),
-        "Accept-Language": "pt-BR,pt;q=0.9" if lang == "pt" else "en-US,en;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Connection": "keep-alive",
-    }
-    cookies = {"age_verified": "1", "RTA": "1"}
-
-    for attempt in range(1, 3):
-        try:
-            async with session.post(
-                url, headers=headers, cookies=cookies, timeout=timeout_obj
-            ) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    html = preprocess_html(html)
-                    save_cache_html(url, html)
-                    return html
-        except Exception:
-            pass
-        await asyncio.sleep(2**attempt + random.uniform(0, 0.5))
-    return ""
-
-
-def cosine_similarity(v1, v2):
-    return float(np.dot(v1 / np.linalg.norm(v1), v2 / np.linalg.norm(v2)))
-
-
 async def search_engine_async(query, link_count):
     payload = {"q": query, "format": "json", "language": "en"}
     ranked_links = []
@@ -311,95 +287,32 @@ async def search_engine_async(query, link_count):
                 for result in data.get("results", []):
                     link = result.get("url")
                     if link and is_valid_link(link):
-                        title = result.get("title", "")
-                        snippet = result.get("content", "")
-                        query_embed = model_embed.encode(query)
-                        text_embed = model_embed.encode(f"{title} {snippet}")
-                        score = cosine_similarity(query_embed, text_embed)
-                        ranked_links.append((score, link))
-        ranked_links.sort(reverse=True)
+                        ranked_links.append((0.0, link))
         return [link for _, link in ranked_links[:link_count]]
     except Exception as e:
         return []
 
 
-def extract_relevant_links_from_html(html, base_url, query_embed):
-    soup = BeautifulSoup(html, "lxml")
-    links_with_scores = []
-    seen = set()
-
-    for a in soup.find_all("a", href=True):
-        if isinstance(a, Tag):
-            href = a.get("href")
-            text = a.get_text(strip=True)
-            url = urljoin(base_url, str(href))
-            if is_valid_link(url) and url not in seen and text:
-                seen.add(url)
-                text_embed = model_embed.encode(text)
-                sim = cosine_similarity(query_embed, text_embed)
-                links_with_scores.append((sim, url))
-
-    if links_with_scores:
-        threshold = np.percentile([s for s, _ in links_with_scores], 75)
-        return [
-            url for sim, url in links_with_scores if sim >= max(float(threshold), 0.35)
-        ][:5]
-    return []
+def extract_relevant_links_from_html_qdrant(query_embed, top_k=5):
+    results = qdrant.search(
+        collection_name="videos", query_vector=query_embed.tolist(), limit=top_k
+    )
+    return [
+        r.payload["source_url"]
+        for r in results
+        if r.payload and "source_url" in r.payload
+    ]
 
 
-def extract_video_links_from_html(html, base_url, query_embed):
-    soup = BeautifulSoup(html, "lxml")
-    seen = set()
-    links_with_scores = []
-
-    for tag in soup.find_all(
-        ["a", "video", "source", "iframe"], href=True
-    ) + soup.find_all("a", src=True):
-        if not isinstance(tag, Tag):
-            continue
-        href = tag.get("href") or tag.get("src")
-        text = (
-            tag.get("title")
-            or tag.get("alt")
-            or tag.get("data-title")
-            or tag.get("data-name")
-            or tag.get_text(strip=True)
-        )
-
-        if href:
-            url = urljoin(base_url, str(href))
-            if not is_valid_link(url) or url in seen:
-                continue
-            seen.add(url)
-
-            is_video = any(
-                x in url.lower()
-                for x in [
-                    "/video",
-                    "/watch",
-                    "/view",
-                    ".mp4",
-                    ".m3u8",
-                    ".webm",
-                    ".mov",
-                    ".avi",
-                    ".flv",
-                ]
-            )
-            score = 0.0
-
-            if text and isinstance(text, str):
-                text_embeded = model_embed.encode(text)
-                score = cosine_similarity(query_embed, text_embeded)
-                if is_video:
-                    score += 0.3
-            elif is_video:
-                score = 0.4
-
-            if score > 0.3:
-                links_with_scores.append((score, url))
-    links_with_scores.sort(reverse=True)
-    return [url for _, url in links_with_scores[:5]]
+def extract_video_links_qdrant(query_embed, top_k=5):
+    results = qdrant.search(
+        collection_name="videos", query_vector=query_embed.tolist(), limit=top_k
+    )
+    return [
+        r.payload["video_url"]
+        for r in results
+        if r.payload and "video_url" in r.payload
+    ]
 
 
 async def process_url_async(url, session, query_embed):
@@ -430,7 +343,7 @@ async def process_url_async(url, session, query_embed):
         except Exception:
             return None
 
-    video_links = extract_video_links_from_html(html, url, query_embed)
+    video_links = extract_video_links_qdrant(query_embed)
     if len(text.strip()) < 100 and not video_links:
         return None
 
@@ -447,7 +360,7 @@ async def process_url_async(url, session, query_embed):
     result = {
         "url": url,
         "summary": text.strip(),
-        "summary_links": extract_relevant_links_from_html(html, url, query_embed),
+        "summary_links": extract_relevant_links_from_html_qdrant(query_embed),
         "video_links": video_links,
         "hash": text_hash,
         "title": meta.get("title", ""),
@@ -457,6 +370,30 @@ async def process_url_async(url, session, query_embed):
     }
 
     save_cache_summary(url, result)
+
+    vector = model_embed.encode(
+        f"{result['title']} {result['description']} {result['summary']}"
+    )
+
+    qdrant.upsert(
+        collection_name="videos",
+        points=[
+            PointStruct(
+                id=str(uuid.uuid5(uuid.NAMESPACE_URL, result["url"])),
+                vector=vector.tolist(),
+                payload={
+                    "title": result["title"],
+                    "description": result["description"],
+                    "tags": result.get("summary_links", []),
+                    "video_url": (
+                        result["video_links"][0] if result["video_links"] else ""
+                    ),
+                    "source_url": result["url"],
+                },
+            )
+        ],
+    )
+
     return result
 
 
@@ -509,20 +446,7 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
                 tasks.remove(d)
                 r = d.result()
                 if r:
-                    summary_embed = model_embed.encode(r["summary"])
-                    title_embed = (
-                        model_embed.encode(r["title"]) if r["title"] else query_embed
-                    )
-                    r["similarity"] = 0.7 * cosine_similarity(
-                        query_embed, summary_embed
-                    ) + 0.3 * cosine_similarity(query_embed, title_embed)
                     results.append(r)
-
-    results = sorted(results, key=lambda x: x.get("similarity", 0), reverse=True)[
-        :max_sites
-    ]
-    for r in results:
-        r["similarity"] = float(r["similarity"])
 
     with open("results.json", "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
@@ -550,5 +474,28 @@ async def search(
                 "videos": item.get("video_links", []),
             }
             for item in results
+        ]
+    )
+
+
+@app.get("/qdrant_search")
+async def qdrant_search(query: str, top_k: int = 10):
+    query_vector = model_embed.encode(query).tolist()
+
+    results = qdrant.search(
+        collection_name="videos", query_vector=query_vector, limit=top_k
+    )
+
+    return JSONResponse(
+        content=[
+            {
+                "title": (p := r.payload or {}).get("title"),
+                "description": p.get("description"),
+                "video_url": p.get("video_url"),
+                "source_url": p.get("source_url"),
+                "score": r.score,
+                "tags": p.get("tags", []),
+            }
+            for r in results
         ]
     )
