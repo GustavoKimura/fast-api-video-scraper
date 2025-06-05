@@ -9,62 +9,76 @@
     ></script>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
+      /* Reset & Base */
       body {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
           Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
         background: #000;
         color: #fff;
         margin: 0;
-        padding: 0.75rem 1rem;
+        padding: 1rem;
         line-height: 1.4;
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
       }
 
+      /* Form Container */
       form {
-        max-width: 100%;
-        margin: 0 auto 1.25rem;
+        max-width: 600px;
+        margin: 0 auto 1.5rem;
         display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-      }
-      input,
-      button {
-        padding: 0.6rem 0.75rem;
-        font-size: 1.1rem;
-        width: 100%;
-        border: none;
-        border-radius: 8px;
-        box-sizing: border-box;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        justify-content: center;
+        align-items: center;
       }
 
-      input,
-      button {
-        padding: 0.6rem 0.75rem;
+      /* Inputs and Button */
+      input[type="search"] {
+        flex: 1 1 100%;
+        padding: 0.7rem 1rem;
         font-size: 1.1rem;
-        width: 100%;
         border: none;
         border-radius: 8px;
-        box-sizing: border-box;
-      }
-
-      input {
         background: #111;
         color: #eee;
         outline-offset: 2px;
         outline-color: #5ab4f0;
+        box-sizing: border-box;
       }
 
-      input::placeholder {
+      input[type="search"]::placeholder {
         color: #666;
       }
 
+      input[type="number"] {
+        flex: 1 1 140px;
+        min-width: 120px;
+        max-width: 180px;
+        padding: 0.6rem 1rem;
+        font-size: 1rem;
+        border: none;
+        border-radius: 8px;
+        background: #111;
+        color: #eee;
+        outline-offset: 2px;
+        outline-color: #5ab4f0;
+        box-sizing: border-box;
+      }
+
       button {
+        flex: 1 1 150px;
+        max-width: 200px;
+        padding: 0.65rem 1rem;
+        font-size: 1.1rem;
+        font-weight: 700;
         background: #5ab4f0;
         color: #000;
-        font-weight: 700;
+        border: none;
+        border-radius: 8px;
         cursor: pointer;
         transition: background-color 0.3s ease;
+        box-sizing: border-box;
       }
 
       button:hover,
@@ -73,47 +87,58 @@
         outline: none;
       }
 
+      /* Accessibility */
       [x-cloak] {
         display: none !important;
       }
 
+      /* Loading */
+      .loading {
+        text-align: center;
+        margin: 1rem 0;
+        font-style: italic;
+        color: #88bbff;
+      }
+
+      /* Results Grid */
       .grid {
+        max-width: 1200px;
+        margin: 0 auto;
         display: grid;
         grid-template-columns: 1fr;
         gap: 1rem;
-        max-width: 100%;
-        margin: 0 auto;
       }
 
+      /* Cards */
       .card {
         background: #111;
         border-radius: 12px;
-        overflow: hidden;
-        padding: 0.75rem;
+        padding: 1rem;
+        box-shadow: 0 0 10px rgba(90, 180, 240, 0.15);
         display: flex;
         flex-direction: column;
-        box-shadow: 0 0 10px rgba(90, 180, 240, 0.15);
         transition: box-shadow 0.3s ease;
+        outline-offset: 3px;
       }
 
       .card:hover,
       .card:focus-within {
         box-shadow: 0 0 20px rgba(130, 207, 255, 0.6);
+        outline: none;
       }
 
       video {
         width: 100%;
-        height: auto;
+        max-height: 280px;
         border-radius: 10px;
         background: #000;
         margin-bottom: 0.75rem;
-        max-height: 220px;
         object-fit: contain;
       }
 
       h3 {
-        font-size: 1.1rem;
-        margin: 0 0 0.3rem 0;
+        font-size: 1.2rem;
+        margin: 0 0 0.4rem 0;
         color: #cce6ff;
         word-break: break-word;
       }
@@ -126,36 +151,27 @@
         word-break: break-word;
       }
 
+      /* Responsive grid columns */
       @media (min-width: 600px) {
-        form {
-          max-width: 600px;
-        }
-
         .grid {
           grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-          max-width: 1200px;
-        }
-
-        video {
-          max-height: 260px;
         }
       }
 
       @media (min-width: 900px) {
         video {
-          max-height: 300px;
+          max-height: 320px;
         }
       }
     </style>
   </head>
-
   <body>
     <form @submit.prevent="search" role="search" aria-label="Video search form">
       <input
         x-model="query"
+        type="search"
         placeholder="Search videos..."
         aria-label="Search videos"
-        type="search"
         required
         autocomplete="off"
       />
@@ -166,7 +182,7 @@
         min="1"
         max="100"
         step="1"
-        placeholder="Number of links to scrap (e.g. 10)"
+        placeholder="Links to scrap (e.g. 10)"
         aria-label="Number of links to scrap"
         required
       />
@@ -186,11 +202,7 @@
     </form>
 
     <template x-if="loading">
-      <div
-        role="status"
-        aria-live="polite"
-        style="text-align: center; margin: 1rem 0"
-      >
+      <div class="loading" role="status" aria-live="polite">
         Loading results...
       </div>
     </template>
