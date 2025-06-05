@@ -1,31 +1,40 @@
-import asyncio
-import hashlib
-import json
-import os
-import random
-import time
-import open_clip
-import torch
-import uuid
-import aiohttp
-import tldextract
-import trafilatura
-
+# === 📦 IMPORTS ===
+import os, json, time, uuid, random, hashlib, asyncio
 from urllib.parse import urlparse, urlunparse
-from aiohttp import ClientTimeout
-from bs4 import BeautifulSoup, Tag
-from deep_translator import GoogleTranslator
+
+import torch, open_clip, aiohttp, tldextract, trafilatura
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
-from langdetect import DetectorFactory, detect
+from bs4 import BeautifulSoup, Tag
 from readability import Document
+from langdetect import DetectorFactory, detect
+from deep_translator import GoogleTranslator
+from aiohttp import ClientTimeout
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from keybert import KeyBERT
 from playwright.async_api import async_playwright
-from urllib.parse import urlparse
+
+# === ⚙️ CONFIGURATION ===
+app = FastAPI()
+DetectorFactory.seed = 0
+timeout_obj = ClientTimeout(total=5)
+MAX_PARALLEL_TASKS = os.cpu_count() or 4
+CACHE_EXPIRATION = 10
+SEARXNG_BASE_URL = "http://localhost:8888/search"
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Mozilla/5.0 (X11; Linux x86_64)",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+]
+
+BLOCKED_DOMAINS = {...}
+BLOCKED_KEYWORDS = [...]
+LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
 
+# === 🧠 MODELS ===
 class OpenCLIPEmbedder:
     def __init__(
         self, model_name="ViT-B-32", pretrained="laion2b_s32b_b79k", device=None
@@ -44,133 +53,23 @@ class OpenCLIPEmbedder:
         return features.cpu().numpy()[0]
 
 
-async def fetch_rendered_html_playwright(url: str, timeout: int = 15000) -> str:
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-web-security",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                ],
-            )
-
-            domain = urlparse(url).netloc.replace("www.", "")
-
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                java_script_enabled=True,
-                viewport={"width": 1280, "height": 720},
-            )
-
-            await context.add_cookies(
-                [
-                    {"name": "RTA", "value": "1", "domain": f".{domain}", "path": "/"},
-                    {
-                        "name": "age_verified",
-                        "value": "1",
-                        "domain": f".{domain}",
-                        "path": "/",
-                    },
-                ]
-            )
-
-            page = await context.new_page()
-            await page.goto(url, timeout=timeout)
-            await page.wait_for_timeout(3000)
-
-            html = await page.content()
-            await context.close()
-            await browser.close()
-            return html
-    except Exception as e:
-        print(f"[Playwright Error] {url}: {e}")
-        return ""
-
-
-# App setup
-app = FastAPI()
-qdrant = QdrantClient(host="localhost", port=6333)
-qdrant.recreate_collection(
-    collection_name="videos",
-    vectors_config=VectorParams(size=512, distance=Distance.COSINE),
-)
+model_embed = OpenCLIPEmbedder()
 kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
 
-
-# Initialization
-DetectorFactory.seed = 0
-
-# Constants
-MAX_PARALLEL_TASKS = os.cpu_count() or 4
-CACHE_EXPIRATION = 10
-SEARXNG_BASE_URL = "http://localhost:8888/search"
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Mozilla/5.0 (X11; Linux x86_64)",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-]
-BLOCKED_DOMAINS = {
-    "facebook.com",
-    "twitter.com",
-    "instagram.com",
-    "youtube.com",
-    "linkedin.com",
-    "pinterest.com",
-    "tiktok.com",
-    "quora.com",
-    "fandom.com",
-    "wikia.org",
-    "wikihow.com",
-    "stackoverflow.com",
-    "github.com",
-    "reuters.com",
-    "bloomberg.com",
-    "marketwatch.com",
-}
-BLOCKED_KEYWORDS = [
-    "quora",
-    "board",
-    "discussion",
-    "signup",
-    "login",
-    "register",
-    "comment",
-    "thread",
-    "showthread",
-    "archive",
-]
-LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
-
-# Clients & models
-timeout_obj = ClientTimeout(total=5)
-model_embed = OpenCLIPEmbedder()
+# === 🔍 QDRANT SETUP ===
+qdrant = QdrantClient(host="localhost", port=6333)
+qdrant.recreate_collection(
+    "videos", vectors_config=VectorParams(size=512, distance=Distance.COSINE)
+)
 
 
-def detect_language(text):
-    try:
-        lang = detect(text)
-        return lang if lang not in LANGUAGES_BLACKLIST else "en"
-    except Exception:
-        return "en"
-
-
-def translate_text(text, target="en"):
-    try:
-        return GoogleTranslator(source="auto", target=target).translate(text)
-    except Exception:
-        return text
-
-
+# === 🔧 UTILITIES ===
 def get_user_agent():
     return random.choice(USER_AGENTS)
 
 
 def normalize_url(url):
-    parts = urlparse(url)
-    return urlunparse((parts.scheme, parts.netloc, parts.path, "", "", ""))
+    return urlunparse(urlparse(url)._replace(query="", fragment=""))
 
 
 def get_main_domain(url):
@@ -182,13 +81,13 @@ def is_valid_link(url):
     domain = get_main_domain(url).lower()
     if domain in BLOCKED_DOMAINS:
         return False
-    if not url.lower().startswith(("http://", "https://")):
+    if not url.startswith(("http://", "https://")):
         return False
     if any(c in url for c in ['"', "'", "\\", " "]):
         return False
     if any(kw in url.lower() for kw in BLOCKED_KEYWORDS):
         return False
-    if url.lower().split("?")[0].split("#")[0].split(".")[-1] in [
+    if url.split("?")[0].split("#")[0].split(".")[-1] in [
         "pdf",
         "doc",
         "xls",
@@ -200,9 +99,37 @@ def is_valid_link(url):
     return True
 
 
-def build_cache_path(url, folder, extension):
-    filename = hashlib.md5(normalize_url(url).encode()).hexdigest()
-    return f"{folder}/{filename}.{extension}"
+def detect_language(text):
+    try:
+        lang = detect(text)
+        return lang if lang not in LANGUAGES_BLACKLIST else "en"
+    except:
+        return "en"
+
+
+def translate_text(text, target="en"):
+    try:
+        return GoogleTranslator(source="auto", target=target).translate(text)
+    except:
+        return text
+
+
+# === 📥 CACHE SYSTEM ===
+def build_cache_path(url, folder, ext):
+    def ensure_str(value) -> str:
+        if isinstance(value, memoryview):
+            value = bytes(value)
+        if isinstance(value, (bytes, bytearray)):
+            return value.decode("utf-8", errors="ignore")
+        return str(value)
+
+    normalized = normalize_url(ensure_str(url))
+
+    if not isinstance(normalized, str):
+        raise TypeError("Normalized URL must be a string")
+
+    fname = hashlib.md5(normalized.encode("utf-8")).hexdigest()
+    return f"{folder}/{fname}.{ext}"
 
 
 def read_cache(path):
@@ -224,20 +151,12 @@ def save_cache(path, content):
             f.write(content)
 
 
-def read_cache_html(url):
-    return read_cache(build_cache_path(url, "cache/html", "html"))
+def cache_html(url):
+    return build_cache_path(url, "cache/html", "html")
 
 
-def save_cache_html(url, html):
-    save_cache(build_cache_path(url, "cache/html", "html"), html)
-
-
-def read_cache_summary(url):
-    return read_cache(build_cache_path(url, "cache/summary", "json"))
-
-
-def save_cache_summary(url, summary):
-    save_cache(build_cache_path(url, "cache/summary", "json"), summary)
+def cache_summary(url):
+    return build_cache_path(url, "cache/summary", "json")
 
 
 def clean_expired_cache(folder="cache", expiration=CACHE_EXPIRATION):
@@ -245,13 +164,47 @@ def clean_expired_cache(folder="cache", expiration=CACHE_EXPIRATION):
         return
     now = time.time()
     for root, _, files in os.walk(folder):
-        for file in files:
-            path = os.path.join(root, file)
-            if os.path.isfile(path) and (now - os.path.getmtime(path)) > expiration:
+        for f in files:
+            path = os.path.join(root, f)
+            if (now - os.path.getmtime(path)) > expiration:
                 try:
                     os.remove(path)
-                except Exception:
+                except:
                     continue
+
+
+# === 🌐 RENDER + EXTRACT ===
+async def fetch_rendered_html_playwright(url, timeout=15000):
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            )
+            context = await browser.new_context(
+                user_agent=get_user_agent(), viewport={"width": 1280, "height": 720}
+            )
+            domain = urlparse(url).netloc.replace("www.", "")
+            await context.add_cookies(
+                [
+                    {"name": "RTA", "value": "1", "domain": f".{domain}", "path": "/"},
+                    {
+                        "name": "age_verified",
+                        "value": "1",
+                        "domain": f".{domain}",
+                        "path": "/",
+                    },
+                ]
+            )
+            page = await context.new_page()
+            await page.goto(url, timeout=timeout)
+            await page.wait_for_timeout(3000)
+            html = await page.content()
+            await browser.close()
+            return html
+    except Exception as e:
+        print(f"[Playwright Error] {url}: {e}")
+        return ""
 
 
 def preprocess_html(html):
@@ -265,20 +218,17 @@ def preprocess_html(html):
                 "header",
                 "footer",
                 "nav",
-                "ads",
-                "advertisement",
                 "form",
                 "input",
                 "button",
                 "aside",
-                "comment",
                 "meta",
                 "link",
             ]
         ):
             tag.decompose()
         return str(soup)
-    except Exception:
+    except:
         return html
 
 
@@ -288,116 +238,88 @@ def extract_content(html):
             trafilatura.extract(html, include_comments=False, include_tables=False)
             or ""
         )
-    except Exception:
+    except:
         return ""
 
 
-def safe_strip(value):
-    return value.strip() if isinstance(value, str) else ""
-
-
-def auto_generate_tags_from_text(text, top_k=5):
-    keywords = kw_model.extract_keywords(
-        text,
-        keyphrase_ngram_range=(1, 3),
-        stop_words="english",
-        use_mmr=True,
-        diversity=0.7,
-        top_n=top_k,
+def filter_text(text):
+    blacklist = ["advertisement", "cookies", "policy", "login", "register"]
+    return "\n".join(
+        [
+            l.strip()
+            for l in text.splitlines()
+            if len(l.strip()) >= 15 and not any(b in l.lower() for b in blacklist)
+        ]
     )
-    return [kw for kw, _ in keywords]
+
+
+def safe_strip(v):
+    return v.strip() if isinstance(v, str) else ""
 
 
 async def extract_metadata(html):
     soup = BeautifulSoup(html, "lxml")
-    meta = {
-        "title": safe_strip(soup.title.string) if soup.title else "",
-        "description": "",
-        "author": "",
+
+    title = (
+        soup.title.string if soup.title and isinstance(soup.title.string, str) else ""
+    )
+
+    desc_tag = soup.find("meta", {"name": "description"}) or soup.find(
+        "meta", {"property": "og:description"}
+    )
+    desc = (
+        desc_tag.get("content")
+        if isinstance(desc_tag, Tag) and desc_tag.has_attr("content")
+        else ""
+    )
+
+    author_tag = soup.find("meta", {"name": "author"})
+    author = (
+        author_tag.get("content")
+        if isinstance(author_tag, Tag) and author_tag.has_attr("content")
+        else ""
+    )
+
+    return {
+        "title": title.strip() if isinstance(title, str) else "",
+        "description": desc.strip() if isinstance(desc, str) else "",
+        "author": author.strip() if isinstance(author, str) else "",
     }
-    desc = soup.find("meta", attrs={"name": "description"}) or soup.find(
-        "meta", attrs={"property": "og:description"}
-    )
-    author = soup.find("meta", attrs={"name": "author"})
-    if isinstance(desc, Tag):
-        meta["description"] = safe_strip(desc.get("content"))
-    if isinstance(author, Tag):
-        meta["author"] = safe_strip(author.get("content"))
-    return meta
 
 
-def filter_text(text):
-    lines = text.splitlines()
-    blacklist = [
-        "advertisement",
-        "ads",
-        "cookies",
-        "terms",
-        "privacy",
-        "policy",
-        "login",
-        "sign up",
-        "click here",
-        "subscribe",
-        "register",
-        "comment section",
+# === 🔍 SEARCH PIPELINE ===
+def auto_generate_tags_from_text(text, top_k=5):
+    return [
+        kw
+        for kw, _ in kw_model.extract_keywords(
+            text, keyphrase_ngram_range=(1, 3), use_mmr=True, diversity=0.7, top_n=top_k
+        )
     ]
-    return "\n".join(
-        line.strip()
-        for line in lines
-        if len(line.strip()) >= 15 and not any(b in line.lower() for b in blacklist)
-    )
 
 
-async def search_engine_async(query, link_count):
-    payload = {"q": query, "format": "json", "language": "en"}
-    ranked_links = []
-
-    try:
-        async with aiohttp.ClientSession(timeout=timeout_obj) as session:
-            async with session.post(
-                url=SEARXNG_BASE_URL,
-                data=payload,
-                headers={"User-Agent": get_user_agent()},
-            ) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                for result in data.get("results", []):
-                    link = result.get("url")
-                    if link and is_valid_link(link):
-                        ranked_links.append((0.0, link))
-        return [link for _, link in ranked_links[:link_count]]
-    except Exception as e:
-        return []
-
-
-def extract_relevant_links_from_html_qdrant(query_embed, top_k=5):
-    results = qdrant.search(
-        collection_name="videos", query_vector=query_embed.tolist(), limit=top_k
-    )
+def extract_relevant_links_qdrant(query_embed, top_k=5):
     return [
         r.payload["source_url"]
-        for r in results
+        for r in qdrant.search(
+            collection_name="videos", query_vector=query_embed.tolist(), limit=top_k
+        )
         if r.payload and "source_url" in r.payload
     ]
 
 
 def extract_video_links_qdrant(query_embed, top_k=5):
-    results = qdrant.search(
-        collection_name="videos", query_vector=query_embed.tolist(), limit=top_k
-    )
     return [
         r.payload["video_url"]
-        for r in results
+        for r in qdrant.search(
+            collection_name="videos", query_vector=query_embed.tolist(), limit=top_k
+        )
         if r.payload and "video_url" in r.payload
     ]
 
 
-async def process_url_async(url, session, query_embed):
+async def process_url_async(url, query_embed):
     if not is_valid_link(url):
         return None
-
     html = await fetch_rendered_html_playwright(url)
     if not html:
         return None
@@ -408,29 +330,19 @@ async def process_url_async(url, session, query_embed):
             text = filter_text(
                 BeautifulSoup(Document(html).summary(), "lxml").get_text("\n")
             )
-        except Exception:
+        except:
             text = ""
-
     if len(text) < 200:
         try:
-            soup = BeautifulSoup(html, "lxml")
-            for tag in soup(
-                ["script", "style", "header", "footer", "nav", "aside", "form"]
-            ):
-                tag.decompose()
-            text = filter_text(soup.get_text("\n"))
-        except Exception:
+            text = filter_text(BeautifulSoup(html, "lxml").get_text("\n"))
+        except:
             return None
-
-    video_links = extract_video_links_qdrant(query_embed)
-    if len(text.strip()) < 100 and not video_links:
-        return None
 
     lang = detect_language(text)
     if lang != "en":
-        text = translate_text(text, "en")
+        text = translate_text(text)
 
-    summary_cache = read_cache_summary(url)
+    summary_cache = read_cache(cache_summary(url))
     text_hash = hashlib.md5(text.encode()).hexdigest()
     if isinstance(summary_cache, dict) and summary_cache.get("hash") == text_hash:
         return summary_cache
@@ -439,132 +351,121 @@ async def process_url_async(url, session, query_embed):
     result = {
         "url": url,
         "summary": text.strip(),
-        "summary_links": extract_relevant_links_from_html_qdrant(query_embed),
-        "video_links": video_links,
+        "summary_links": extract_relevant_links_qdrant(query_embed),
+        "video_links": extract_video_links_qdrant(query_embed),
         "hash": text_hash,
-        "title": meta.get("title", ""),
-        "description": meta.get("description", ""),
-        "author": meta.get("author", ""),
+        "title": meta["title"],
+        "description": meta["description"],
+        "author": meta["author"],
         "language": "en",
     }
+    save_cache(cache_summary(url), result)
 
-    save_cache_summary(url, result)
-
-    vector = model_embed.encode(
-        f"{result['title']} {result['description']} {result['summary']}"
-    )
-
+    vector = model_embed.encode(f"{meta['title']} {meta['description']} {text}")
     qdrant.upsert(
-        collection_name="videos",
-        points=[
+        "videos",
+        [
             PointStruct(
-                id=str(uuid.uuid5(uuid.NAMESPACE_URL, result["url"])),
+                id=str(uuid.uuid5(uuid.NAMESPACE_URL, url)),
                 vector=vector.tolist(),
                 payload={
-                    "title": result["title"],
-                    "description": result["description"],
+                    "title": meta["title"],
+                    "description": meta["description"],
                     "tags": auto_generate_tags_from_text(text),
                     "video_url": (
                         result["video_links"][0] if result["video_links"] else ""
                     ),
-                    "source_url": result["url"],
+                    "source_url": url,
                 },
             )
         ],
     )
-
     return result
+
+
+async def search_engine_async(query, link_count):
+    payload = {"q": query, "format": "json", "language": "en"}
+    async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+        async with session.post(
+            SEARXNG_BASE_URL, data=payload, headers={"User-Agent": get_user_agent()}
+        ) as resp:
+            if resp.status != 200:
+                return []
+            data = await resp.json()
+            return [
+                r.get("url")
+                for r in data.get("results", [])
+                if is_valid_link(r.get("url"))
+            ][:link_count]
 
 
 async def advanced_search_async(query, links_to_scrap, max_sites):
     query_embed = model_embed.encode(query)
-    collected = set()
-    all_links = []
-    results = []
-    processed = set()
-    sem = asyncio.Semaphore(MAX_PARALLEL_TASKS)
-    max_links = links_to_scrap
+    all_links, results, processed = [], [], set()
+    collected, sem = set(), asyncio.Semaphore(MAX_PARALLEL_TASKS)
 
-    async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+    async def worker(url):
+        async with sem:
+            try:
+                return await process_url_async(url, query_embed)
+            except:
+                return None
 
-        async def worker(url):
-            async with sem:
-                try:
-                    return await process_url_async(url, session, query_embed)
-                except Exception:
-                    return None
-
-        def launch(i, tasks):
-            while i < len(all_links) and len(tasks) < MAX_PARALLEL_TASKS:
-                url = all_links[i]
-                if url not in processed:
-                    processed.add(url)
-                    tasks.append(asyncio.create_task(worker(url)))
-                i += 1
-            return i
-
-        i, tasks = 0, []
-        while len(results) < max_sites:
-            if i >= len(all_links):
-                max_links += links_to_scrap
-                links = await search_engine_async(query, max_links)
-                new_links = [
-                    u for u in links if is_valid_link(u) and u not in collected
-                ]
-                if not new_links:
-                    break
-                collected.update(new_links)
-                all_links.extend(new_links)
-
-            i = launch(i, tasks)
-            if not tasks:
+    i, tasks = 0, []
+    while len(results) < max_sites:
+        if i >= len(all_links):
+            links = await search_engine_async(query, links_to_scrap)
+            new_links = [u for u in links if u not in collected]
+            if not new_links:
                 break
+            all_links += new_links
+            collected.update(new_links)
 
-            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for d in done:
-                tasks.remove(d)
-                r = d.result()
-                if r:
-                    results.append(r)
+        while i < len(all_links) and len(tasks) < MAX_PARALLEL_TASKS:
+            url = all_links[i]
+            if url not in processed:
+                processed.add(url)
+                tasks.append(asyncio.create_task(worker(url)))
+            i += 1
 
-    with open("results.json", "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for d in done:
+            tasks.remove(d)
+            if r := d.result():
+                results.append(r)
 
     return results
 
 
+# === 🌐 FASTAPI ROUTES ===
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return open("./index.html", encoding="utf-8").read()
+    return open("index.html", encoding="utf-8").read()
 
 
 @app.get("/search")
 async def search(
-    query: str = "O que é batata inglesa?", links_to_scrap: int = 10, summaries: int = 5
+    query: str = "batata inglesa", links_to_scrap: int = 10, summaries: int = 5
 ):
     clean_expired_cache()
     results = await advanced_search_async(query, links_to_scrap, summaries)
     return JSONResponse(
         content=[
             {
-                "title": item["title"] or item["url"],
-                "summary": item["summary"],
-                "links": item.get("summary_links", []),
-                "videos": item.get("video_links", []),
+                "title": r["title"] or r["url"],
+                "summary": r["summary"],
+                "links": r.get("summary_links", []),
+                "videos": r.get("video_links", []),
             }
-            for item in results
+            for r in results
         ]
     )
 
 
 @app.get("/qdrant_search")
 async def qdrant_search(query: str, top_k: int = 10):
-    query_vector = model_embed.encode(query).tolist()
-
-    results = qdrant.search(
-        collection_name="videos", query_vector=query_vector, limit=top_k
-    )
-
+    vec = model_embed.encode(query).tolist()
+    results = qdrant.search("videos", query_vector=vec, limit=top_k)
     return JSONResponse(
         content=[
             {
