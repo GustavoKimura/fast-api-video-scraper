@@ -1,5 +1,5 @@
 # === 📦 IMPORTS ===
-import os, random, hashlib, asyncio, re
+import os, random, hashlib, asyncio, re, time
 from urllib.parse import urlparse, urlunparse, urljoin
 import torch, open_clip, aiohttp, tldextract, trafilatura
 from fastapi import FastAPI
@@ -15,12 +15,16 @@ from playwright.async_api import async_playwright
 from boilerpy3 import extractors
 from numpy import dot
 from numpy.linalg import norm
+from collections import defaultdict
+
+# === 🔒 DOMAIN CONCURRENCY CONTROL ===
+domain_counters = defaultdict(lambda: asyncio.Semaphore(4))
 
 # === ⚙️ CONFIGURATION ===
 DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 content_extractor = extractors.LargestContentExtractor()
-MAX_PARALLEL_TASKS = min(16, (os.cpu_count() or 4) * 2)
+MAX_PARALLEL_TASKS = int(os.getenv("SCRAPER_PARALLELISM", 32))
 SEARXNG_BASE_URL = "http://searxng:8080/search"
 
 USER_AGENTS = [
@@ -400,14 +404,22 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
     collected, sem = set(), asyncio.Semaphore(MAX_PARALLEL_TASKS)
 
     async def worker(url):
-        async with sem:
+        domain = get_main_domain(url)
+        async with sem, domain_counters[domain]:
             try:
-                return await process_url_async(url, query_embed)
-            except:
+                return await asyncio.wait_for(
+                    process_url_async(url, query_embed), timeout=12
+                )
+            except asyncio.TimeoutError:
                 return None
 
     i, tasks = 0, []
+    max_time = 25
+    start_time = time.monotonic()
     while len(results) < max_sites:
+        if time.monotonic() - start_time > max_time:
+            break
+
         if i >= len(all_links):
             links = await search_engine_async(query, links_to_scrap)
             new_links = [u for u in links if u not in collected]
