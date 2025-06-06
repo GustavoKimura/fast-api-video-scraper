@@ -16,6 +16,7 @@ from boilerpy3 import extractors
 from numpy import dot
 from numpy.linalg import norm
 from collections import defaultdict
+from typing import List, Tuple
 
 # === 🔒 DOMAIN CONCURRENCY CONTROL ===
 domain_counters = defaultdict(lambda: asyncio.Semaphore(4))
@@ -68,25 +69,6 @@ BLOCKED_KEYWORDS = [
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
 
-# === I DO NOT KNOW WHERE TO PUT THIS ===
-def extract_tags(text):
-    clean = re.sub(r"[^a-zA-Z0-9\s]", "", text).lower()
-    top_tags = kw_model.extract_keywords(
-        clean, keyphrase_ngram_range=(1, 3), use_mmr=True, diversity=0.7, top_n=10
-    )
-    return [kw for kw, _ in top_tags]
-
-
-def rank_deep_links(links, query_embed):
-    scored = []
-    for link in links:
-        title_snippet = re.sub(r"[-_/]", " ", link.split("/")[-1])
-        embed = model_embed.encode(title_snippet)
-        sim = cosine_sim(query_embed, embed)
-        scored.append((sim, link))
-    return [link for _, link in sorted(scored, reverse=True)[:5]]
-
-
 # === 🧠 MODELS ===
 class OpenCLIPEmbedder:
     def __init__(
@@ -115,9 +97,16 @@ def cosine_sim(a, b):
     return float(dot(a, b) / (norm(a) * norm(b) + 1e-8))
 
 
-def rank_by_similarity(results, query_embed):
+def rank_by_similarity(results, query_embed, min_duration=60, max_duration=900):
     query_tags = set(extract_tags(query_embed))
+    final = []
+
     for r in results:
+        if r.get("duration"):
+            dur_secs = duration_to_seconds(r["duration"])
+            if not (min_duration <= dur_secs <= max_duration):
+                continue
+
         score = 0.0
         if r.get("tags"):
             tag_text = " ".join(r["tags"])
@@ -126,7 +115,19 @@ def rank_by_similarity(results, query_embed):
             overlap = len(query_tags.intersection(set(r["tags"])))
             score = sim + 0.05 * overlap
         r["score"] = score
-    return sorted(results, key=lambda x: x["score"], reverse=True)
+        final.append(r)
+
+    return sorted(final, key=lambda x: x["score"], reverse=True)
+
+
+def rank_deep_links(links, query_embed):
+    scored = []
+    for link in links:
+        title_snippet = re.sub(r"[-_/]", " ", link.split("/")[-1])
+        embed = model_embed.encode(title_snippet)
+        sim = cosine_sim(query_embed, embed)
+        scored.append((sim, link))
+    return [link for _, link in sorted(scored, reverse=True)[:5]]
 
 
 # === 🔧 UTILITIES ===
@@ -178,6 +179,52 @@ def translate_text(text, target="en"):
         return GoogleTranslator(source="auto", target=target).translate(text)
     except:
         return text
+
+
+def duration_to_seconds(duration_str: str):
+    if not duration_str or not isinstance(duration_str, str):
+        return 0
+
+    parts = duration_str.strip().split(":")
+    try:
+        parts = [int(p) for p in parts]
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+        elif len(parts) == 2:
+            hours = 0
+            minutes, seconds = parts
+        elif len(parts) == 1:
+            hours = 0
+            minutes = 0
+            seconds = parts[0]
+        else:
+            return 0
+        return hours * 3600 + minutes * 60 + seconds
+    except ValueError:
+        return 0
+
+
+def extract_tags(text: str, top_n: int = 10) -> List[Tuple[str, float]]:
+    clean = re.sub(r"[^a-zA-Z0-9\s]", "", text).lower()
+
+    raw_results = kw_model.extract_keywords(
+        clean, keyphrase_ngram_range=(1, 3), use_mmr=True, diversity=0.7, top_n=top_n
+    )  # type: ignore
+
+    if raw_results and isinstance(raw_results[0], list):
+        flat: List[Tuple[str, float]] = []
+        for sublist in raw_results:
+            flat.extend(
+                item for item in sublist if isinstance(item, tuple) and len(item) == 2
+            )
+        return flat
+
+    if isinstance(raw_results, list) and all(
+        isinstance(t, tuple) and len(t) == 2 for t in raw_results
+    ):
+        return raw_results  # type: ignore
+
+    return []
 
 
 # === 🌐 RENDER + EXTRACT ===
