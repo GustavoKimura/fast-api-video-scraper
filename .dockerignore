@@ -9,7 +9,6 @@ __pycache__/
 *.png
 *.sqlite
 *.zip
-cache/
 results.json
 node_modules/
 searxng/

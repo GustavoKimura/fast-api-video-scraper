@@ -4,8 +4,6 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./cache:/app/cache
-      - ./results.json:/app/results.json
       - ./index.html:/app/index.html
     environment:
       - PYTHONUNBUFFERED=1

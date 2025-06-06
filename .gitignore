@@ -72,7 +72,6 @@ dmypy.json
 
 # Local
 *.log
-cache
 results.json
 results.md
 *.lnk

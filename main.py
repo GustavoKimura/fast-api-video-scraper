@@ -1,5 +1,5 @@
 # === 📦 IMPORTS ===
-import os, json, time, random, hashlib, asyncio, re, uuid
+import os, random, hashlib, asyncio, re
 from urllib.parse import urlparse, urlunparse, urljoin
 import torch, open_clip, aiohttp, tldextract, trafilatura
 from fastapi import FastAPI
@@ -13,13 +13,14 @@ from aiohttp import ClientTimeout
 from keybert import KeyBERT
 from playwright.async_api import async_playwright
 from boilerpy3 import extractors
+from numpy import dot
+from numpy.linalg import norm
 
 # === ⚙️ CONFIGURATION ===
 DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 content_extractor = extractors.LargestContentExtractor()
-MAX_PARALLEL_TASKS = os.cpu_count() or 4
-CACHE_EXPIRATION = 10
+MAX_PARALLEL_TASKS = min(16, (os.cpu_count() or 4) * 2)
 SEARXNG_BASE_URL = "http://searxng:8080/search"
 
 USER_AGENTS = [
@@ -46,6 +47,7 @@ BLOCKED_DOMAINS = {
     "bloomberg.com",
     "marketwatch.com",
 }
+
 BLOCKED_KEYWORDS = [
     "quora",
     "board",
@@ -58,6 +60,7 @@ BLOCKED_KEYWORDS = [
     "showthread",
     "archive",
 ]
+
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
 
@@ -82,6 +85,22 @@ class OpenCLIPEmbedder:
 
 model_embed = OpenCLIPEmbedder(model_name="ViT-B-32", pretrained="laion2b_s34b_b79k")
 kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
+
+
+# === 🧩 SEMANTIC RANKING ===
+def cosine_sim(a, b):
+    return float(dot(a, b) / (norm(a) * norm(b) + 1e-8))
+
+
+def rank_by_similarity(results, query_embed):
+    for r in results:
+        if r.get("tags"):
+            tag_text = " ".join(r["tags"])
+            tag_embed = model_embed.encode(tag_text)
+            r["score"] = cosine_sim(query_embed, tag_embed)
+        else:
+            r["score"] = 0.0
+    return sorted(results, key=lambda x: x["score"], reverse=True)
 
 
 # === 🔧 UTILITIES ===
@@ -133,65 +152,6 @@ def translate_text(text, target="en"):
         return GoogleTranslator(source="auto", target=target).translate(text)
     except:
         return text
-
-
-# === 📥 CACHE SYSTEM ===
-def build_cache_path(url, folder, ext):
-    def ensure_str(value) -> str:
-        if isinstance(value, memoryview):
-            value = bytes(value)
-        if isinstance(value, (bytes, bytearray)):
-            return value.decode("utf-8", errors="ignore")
-        return str(value)
-
-    normalized = normalize_url(ensure_str(url))
-
-    if not isinstance(normalized, str):
-        raise TypeError("Normalized URL must be a string")
-
-    fname = hashlib.md5(normalized.encode("utf-8")).hexdigest()
-    return f"{folder}/{fname}.{ext}"
-
-
-def read_cache(path):
-    if (
-        os.path.exists(path)
-        and (time.time() - os.path.getmtime(path)) < CACHE_EXPIRATION
-    ):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f) if path.endswith(".json") else f.read()
-    return None
-
-
-def save_cache(path, content):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        if path.endswith(".json"):
-            json.dump(content, f, ensure_ascii=False, indent=2)
-        else:
-            f.write(content)
-
-
-def cache_html(url):
-    return build_cache_path(url, "cache/html", "html")
-
-
-def cache_summary(url):
-    return build_cache_path(url, "cache/summary", "json")
-
-
-def clean_expired_cache(folder="cache", expiration=CACHE_EXPIRATION):
-    if not os.path.exists(folder):
-        return
-    now = time.time()
-    for root, _, files in os.walk(folder):
-        for f in files:
-            path = os.path.join(root, f)
-            if (now - os.path.getmtime(path)) > expiration:
-                try:
-                    os.remove(path)
-                except:
-                    continue
 
 
 # === 🌐 RENDER + EXTRACT ===
@@ -400,10 +360,7 @@ async def process_url_async(url, query_embed):
     if lang != "en":
         text = translate_text(text)
 
-    summary_cache = read_cache(cache_summary(url))
     text_hash = hashlib.md5(text.encode()).hexdigest()
-    if isinstance(summary_cache, dict) and summary_cache.get("hash") == text_hash:
-        return summary_cache
     meta = await extract_metadata(html)
     tags = auto_generate_tags_from_text(f"{text.strip()} {meta['title']}", top_k=10)
     result = {
@@ -417,7 +374,6 @@ async def process_url_async(url, query_embed):
         "language": "en",
         "tags": tags,
     }
-    save_cache(cache_summary(url), result)
 
     return result
 
@@ -502,8 +458,6 @@ def index():
 
 @app.get("/search")
 async def search(query: str = "", links_to_scrap: int = 10, summaries: int = 5):
-    clean_expired_cache()
-
     results = await advanced_search_async(query, links_to_scrap, summaries)
 
     if not any(r.get("video_links") for r in results):
@@ -511,12 +465,13 @@ async def search(query: str = "", links_to_scrap: int = 10, summaries: int = 5):
     else:
         results = [r for r in results if r.get("video_links")]
 
+    results = rank_by_similarity(results, model_embed.encode(query))
+
     return JSONResponse(
         content=[
             {
                 "title": r["title"] or r["url"],
                 "summary": r["summary"],
-                "links": r.get("summary_links", []),
                 "videos": r.get("video_links", []),
                 "tags": r.get("tags", []),
             }
