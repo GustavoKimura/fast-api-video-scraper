@@ -22,4 +22,5 @@ RUN python -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+

@@ -78,25 +78,24 @@ engines:
     engine: yahoo
     shortcut: yh
 
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+    qwant_categ: videos
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: true
+
   - name: startpage
     engine: startpage
     shortcut: sp
     disabled: true
 
-  - name: qwant
-    engine: qwant
-    shortcut: qw
-    qwant_categ: videos
-    disabled: true
-
   - name: mojeek
     engine: mojeek
     shortcut: mjk
-    disabled: true
-
-  - name: duckduckgo
-    engine: duckduckgo
-    shortcut: ddg
     disabled: true
 
   - name: wikipedia

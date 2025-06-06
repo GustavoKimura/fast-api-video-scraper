@@ -4,9 +4,28 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./index.html:/app/index.html
+      - .:/app
     environment:
       - PYTHONUNBUFFERED=1
       - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
       - NODE_OPTIONS=--max-old-space-size=2048
     shm_size: "2gb"
+    depends_on:
+      - searxng
+    networks:
+      - appnet
+
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8080:8080"
+    environment:
+      SEARXNG_SETTINGS_PATH: /etc/searxng/custom_settings.yml
+    volumes:
+      - ./settings.yml:/etc/searxng/custom_settings.yml
+    restart: unless-stopped
+    networks:
+      - appnet
+
+networks:
+  appnet:
