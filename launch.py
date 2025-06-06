@@ -3,7 +3,6 @@ import sys
 import time
 import webbrowser
 import requests
-from qdrant_client import QdrantClient
 
 # === ⚙️ SETTINGS ===
 DEFAULT_RETRIES = 20
@@ -92,26 +91,6 @@ def wait_for_service(
     sys.exit(1)
 
 
-def wait_for_qdrant(retries=DEFAULT_RETRIES, delay=DEFAULT_DELAY):
-    msg = "Waiting for Qdrant (port 6333)"
-    log("waiting", msg, end="")
-
-    dots = ""
-    for _ in range(retries):
-        try:
-            QdrantClient(host="localhost", port=6333).get_collections()
-            print("\r" + " " * (len(msg) + len(dots) + 4), end="\r")
-            log("success", "Qdrant is ready.")
-            return
-        except:
-            dots += "."
-            print(f"\r⏳ {msg}{dots}", end="", flush=True)
-            time.sleep(delay)
-
-    log("error", "Qdrant did not become ready.")
-    sys.exit(1)
-
-
 # === 🌐 BROWSER ===
 def open_browser(url="http://localhost:8000"):
     log("action", f"Opening browser at {url}")
@@ -124,7 +103,6 @@ def main():
     check_docker()
     run_compose("searxng", "SearXNG")
     run_compose(".", "Search Engine Backend")
-    wait_for_qdrant()
     wait_for_service("localhost", 8000)
     open_browser()
     log("success", "🎉 All systems operational!")

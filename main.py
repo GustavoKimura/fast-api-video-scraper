@@ -1,7 +1,6 @@
 # === 📦 IMPORTS ===
 import os, json, time, random, hashlib, asyncio, re, uuid
 from urllib.parse import urlparse, urlunparse, urljoin
-
 import torch, open_clip, aiohttp, tldextract, trafilatura
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -11,9 +10,6 @@ from readability import Document
 from langdetect import DetectorFactory, detect
 from deep_translator import GoogleTranslator
 from aiohttp import ClientTimeout
-
-# from qdrant_client import QdrantClient
-# from qdrant_client.models import Distance, VectorParams, PointStruct
 from keybert import KeyBERT
 from playwright.async_api import async_playwright
 from boilerpy3 import extractors
@@ -86,39 +82,6 @@ class OpenCLIPEmbedder:
 
 model_embed = OpenCLIPEmbedder(model_name="ViT-B-32", pretrained="laion2b_s34b_b79k")
 kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
-
-
-# === 🎯 INDEXER ===
-# class QdrantIndexer:
-#     def __init__(self, client, collection="videos", batch_size=50):
-#         self.client = client
-#         self.collection = collection
-#         self.batch_size = batch_size
-#         self.lock = asyncio.Lock()
-#         self.buffer: list[PointStruct] = []
-
-#     async def add_point(self, point: PointStruct):
-#         async with self.lock:
-#             try:
-#                 self.client.delete(
-#                     collection_name=self.collection,
-#                     points_selector={"points": [point.id]},
-#                 )
-#             except Exception as e:
-#                 print(f"[Indexer] Failed to delete old point {point.id}: {e}")
-
-#             self.buffer.append(point)
-#             if len(self.buffer) >= self.batch_size:
-#                 await self.flush()
-
-#     async def flush(self):
-#         async with self.lock:
-#             if self.buffer:
-#                 print(f"[Indexer] Flushing {len(self.buffer)} items to Qdrant...")
-#                 self.client.upsert(
-#                     collection_name=self.collection, points=self.buffer.copy()
-#                 )
-#                 self.buffer.clear()
 
 
 # === 🔧 UTILITIES ===
@@ -344,26 +307,6 @@ def auto_generate_tags_from_text(text, top_k=5):
     ]
 
 
-# def extract_relevant_links_qdrant(query_embed, top_k=5):
-#     return [
-#         r.payload["source_url"]
-#         for r in qdrant.search(
-#             collection_name="videos", query_vector=query_embed.tolist(), limit=top_k
-#         )
-#         if r.payload and "source_url" in r.payload
-#     ]
-
-
-# def extract_video_links_qdrant(query_embed, top_k=5):
-#     return [
-#         r.payload["video_url"]
-#         for r in qdrant.search(
-#             collection_name="videos", query_vector=query_embed.tolist(), limit=top_k
-#         )
-#         if r.payload and "video_url" in r.payload
-#     ]
-
-
 def extract_deep_links(html: str, base_url: str) -> list[str]:
     soup = BeautifulSoup(html, "lxml")
     urls = set()
@@ -466,7 +409,6 @@ async def process_url_async(url, query_embed):
     result = {
         "url": url,
         "summary": text.strip(),
-        # "summary_links": extract_relevant_links_qdrant(query_embed),
         "video_links": extract_video_sources(html, url),
         "hash": text_hash,
         "title": meta["title"],
@@ -477,20 +419,6 @@ async def process_url_async(url, query_embed):
     }
     save_cache(cache_summary(url), result)
 
-    # point = PointStruct(
-    #     id=str(uuid.uuid5(uuid.NAMESPACE_URL, normalize_url(url))),
-    #     vector=model_embed.encode(
-    #         f"{meta['title']} {meta['description']} {text}"
-    #     ).tolist(),
-    #     payload={
-    #         "title": meta["title"],
-    #         "description": meta["description"],
-    #         "tags": tags,
-    #         "video_url": (result["video_links"][0] if result["video_links"] else ""),
-    #         "source_url": url,
-    #     },
-    # )
-    # await indexer.add_point(point)
     return result
 
 
@@ -545,36 +473,15 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
             if r := d.result():
                 results.append(r)
 
-    # await indexer.flush()
-
     return results
 
 
 # === 🌐 FASTAPI ROUTES ===
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # global qdrant, indexer
-
     async def auto_flush_loop():
         while True:
             await asyncio.sleep(10)
-            # await indexer.flush()
-
-    # for attempt in range(20):
-    #     try:
-    #         qdrant = QdrantClient(host="qdrant", port=6333)
-    #         qdrant.get_collections()
-    #         break
-    #     except Exception as e:
-    #         print(f"[{attempt+1}/20] Waiting for Qdrant: {e}")
-    #         await asyncio.sleep(2)
-    # else:
-    #     raise RuntimeError("Qdrant did not become available.")
-
-    # qdrant.recreate_collection(
-    #     "videos", vectors_config=VectorParams(size=512, distance=Distance.COSINE)
-    # )
-    # indexer = QdrantIndexer(qdrant)
 
     flush_task = asyncio.create_task(auto_flush_loop())
     yield
@@ -616,26 +523,3 @@ async def search(query: str = "", links_to_scrap: int = 10, summaries: int = 5):
             for r in results
         ]
     )
-
-
-# @app.get("/qdrant_search")
-# async def qdrant_search(query: str, top_k: int = 10):
-#     vec = model_embed.encode(query).tolist()
-#     results = sorted(
-#         qdrant.search("videos", query_vector=vec, limit=top_k),
-#         key=lambda r: r.score,
-#         reverse=True,
-#     )
-#     return JSONResponse(
-#         content=[
-#             {
-#                 "title": (p := r.payload or {}).get("title"),
-#                 "description": p.get("description"),
-#                 "video_url": p.get("video_url"),
-#                 "source_url": p.get("source_url"),
-#                 "score": r.score,
-#                 "tags": p.get("tags", []),
-#             }
-#             for r in results
-#         ]
-#     )
