@@ -1,5 +1,5 @@
 # === 📦 IMPORTS ===
-import os, random, hashlib, asyncio, re, time
+import os, random, hashlib, asyncio, re, time, psutil
 from urllib.parse import urlparse, urlunparse, urljoin
 import torch, open_clip, aiohttp, tldextract, trafilatura
 from fastapi import FastAPI
@@ -21,11 +21,24 @@ from typing import List, Tuple
 # === 🔒 DOMAIN CONCURRENCY CONTROL ===
 domain_counters = defaultdict(lambda: asyncio.Semaphore(4))
 
+
 # === ⚙️ CONFIGURATION ===
+def max_throughput_config():
+    cores = os.cpu_count() or 4
+    ram_gb = psutil.virtual_memory().total // 1_073_741_824
+    task_multiplier = 6 if ram_gb > 16 else 3
+
+    return min(cores * task_multiplier, 512)
+
+
+MAX_PARALLEL_TASKS = max_throughput_config()
+LINKS_TO_SCRAP = 10
+SUMMARIES = 5
+
 DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 content_extractor = extractors.LargestContentExtractor()
-MAX_PARALLEL_TASKS = int(os.getenv("SCRAPER_PARALLELISM", (os.cpu_count() or 4) * 2))
+
 SEARXNG_BASE_URL = "http://searxng:8080/search"
 
 USER_AGENTS = [
@@ -455,7 +468,7 @@ async def process_url_async(url, query_embed):
     return result
 
 
-async def search_engine_async(query, link_count):
+async def search_engine_async(query):
     payload = {"q": query, "format": "json", "language": "en"}
     async with aiohttp.ClientSession(timeout=timeout_obj) as session:
         async with session.post(
@@ -468,10 +481,10 @@ async def search_engine_async(query, link_count):
                 r.get("url")
                 for r in data.get("results", [])
                 if is_valid_link(r.get("url"))
-            ][:link_count]
+            ][:LINKS_TO_SCRAP]
 
 
-async def advanced_search_async(query, links_to_scrap, max_sites):
+async def advanced_search_async(query):
     query_embed = model_embed.encode(query)
     all_links, results, processed = [], [], set()
     collected, sem = set(), asyncio.Semaphore(MAX_PARALLEL_TASKS)
@@ -489,12 +502,12 @@ async def advanced_search_async(query, links_to_scrap, max_sites):
     i, tasks = 0, []
     max_time = 25
     start_time = time.monotonic()
-    while len(results) < max_sites:
+    while len(results) < LINKS_TO_SCRAP:
         if time.monotonic() - start_time > max_time:
             break
 
         if i >= len(all_links):
-            links = await search_engine_async(query, links_to_scrap)
+            links = await search_engine_async(query)
             new_links = [u for u in links if u not in collected]
             if not new_links:
                 break
@@ -541,25 +554,67 @@ def index():
     return open("index.html", encoding="utf-8").read()
 
 
+from fastapi.responses import StreamingResponse
+import json
+
+
 @app.get("/search")
-async def search(query: str = "", links_to_scrap: int = 10, summaries: int = 5):
-    results = await advanced_search_async(query, links_to_scrap, summaries)
+async def search(query: str = "", power_scraping: bool = False):
+    global LINKS_TO_SCRAP, SUMMARIES
 
-    if not any(r.get("video_links") for r in results):
-        results = results[: max(5, summaries)]
+    if power_scraping:
+        cores = os.cpu_count() or 4
+        LINKS_TO_SCRAP = min(cores * 30, 1000)
+        SUMMARIES = min(cores * 10, 500)
     else:
-        results = [r for r in results if r.get("video_links")]
+        LINKS_TO_SCRAP = 10
+        SUMMARIES = 5
 
-    results = rank_by_similarity(results, model_embed.encode(query))
+    query_embed = model_embed.encode(query)
+    all_links, processed = [], set()
+    collected = []
+    sem = asyncio.Semaphore(MAX_PARALLEL_TASKS)
 
-    return JSONResponse(
-        content=[
-            {
-                "title": r["title"] or r["url"],
-                "summary": r["summary"],
-                "videos": r.get("video_links", []),
-                "tags": r.get("tags", []),
-            }
-            for r in results
-        ]
-    )
+    async def worker(url):
+        domain = get_main_domain(url)
+        async with sem, domain_counters[domain]:
+            try:
+                return await asyncio.wait_for(
+                    process_url_async(url, query_embed), timeout=12
+                )
+            except:
+                return None
+
+    async def streamer():
+        nonlocal collected, all_links
+        i = 0
+        start_time = time.monotonic()
+
+        while len(collected) < LINKS_TO_SCRAP and (time.monotonic() - start_time) < 25:
+            if i >= len(all_links):
+                links = await search_engine_async(query)
+                all_links += [u for u in links if u not in processed]
+
+            batch = []
+            while i < len(all_links) and len(batch) < MAX_PARALLEL_TASKS:
+                url = all_links[i]
+                if url not in processed:
+                    processed.add(url)
+                    batch.append(asyncio.create_task(worker(url)))
+                i += 1
+
+            if batch:
+                done, _ = await asyncio.wait(batch, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    try:
+                        result = task.result()
+                        if result and result.get("video_links"):
+                            collected.append(result)
+                            progress = int(100 * len(collected) / LINKS_TO_SCRAP)
+                            yield f"data: {json.dumps({'progress': progress, 'result': result})}\n\n"
+                    except:
+                        continue
+
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(streamer(), media_type="text/event-stream")
