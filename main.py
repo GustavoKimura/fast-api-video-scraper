@@ -24,7 +24,7 @@ domain_counters = defaultdict(lambda: asyncio.Semaphore(4))
 DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 content_extractor = extractors.LargestContentExtractor()
-MAX_PARALLEL_TASKS = int(os.getenv("SCRAPER_PARALLELISM", 32))
+MAX_PARALLEL_TASKS = int(os.getenv("SCRAPER_PARALLELISM", (os.cpu_count() or 4) * 2))
 SEARXNG_BASE_URL = "http://searxng:8080/search"
 
 USER_AGENTS = [
@@ -68,6 +68,25 @@ BLOCKED_KEYWORDS = [
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
 
+# === I DO NOT KNOW WHERE TO PUT THIS ===
+def extract_tags(text):
+    clean = re.sub(r"[^a-zA-Z0-9\s]", "", text).lower()
+    top_tags = kw_model.extract_keywords(
+        clean, keyphrase_ngram_range=(1, 3), use_mmr=True, diversity=0.7, top_n=10
+    )
+    return [kw for kw, _ in top_tags]
+
+
+def rank_deep_links(links, query_embed):
+    scored = []
+    for link in links:
+        title_snippet = re.sub(r"[-_/]", " ", link.split("/")[-1])
+        embed = model_embed.encode(title_snippet)
+        sim = cosine_sim(query_embed, embed)
+        scored.append((sim, link))
+    return [link for _, link in sorted(scored, reverse=True)[:5]]
+
+
 # === 🧠 MODELS ===
 class OpenCLIPEmbedder:
     def __init__(
@@ -97,13 +116,16 @@ def cosine_sim(a, b):
 
 
 def rank_by_similarity(results, query_embed):
+    query_tags = set(extract_tags(query_embed))
     for r in results:
+        score = 0.0
         if r.get("tags"):
             tag_text = " ".join(r["tags"])
             tag_embed = model_embed.encode(tag_text)
-            r["score"] = cosine_sim(query_embed, tag_embed)
-        else:
-            r["score"] = 0.0
+            sim = cosine_sim(query_embed, tag_embed)
+            overlap = len(query_tags.intersection(set(r["tags"])))
+            score = sim + 0.05 * overlap
+        r["score"] = score
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
 
@@ -329,7 +351,7 @@ async def process_url_async(url, query_embed):
     ):
         return None
 
-    deep_links = extract_deep_links(html, url)
+    deep_links = rank_deep_links(extract_deep_links(html, url), query_embed)
 
     for deep_url in deep_links[:5]:
         deep_html = await fetch_rendered_html_playwright(deep_url)
