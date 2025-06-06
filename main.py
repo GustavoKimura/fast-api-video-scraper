@@ -189,7 +189,11 @@ async def fetch_rendered_html_playwright(url, timeout=15000):
                 args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
             )
             context = await browser.new_context(
-                user_agent=get_user_agent(), viewport={"width": 1280, "height": 720}
+                user_agent=get_user_agent(),
+                viewport={"width": 1280, "height": 720},
+                java_script_enabled=True,
+                bypass_csp=True,
+                locale="en-US",
             )
             domain = urlparse(url).netloc.replace("www.", "")
             await context.add_cookies(
