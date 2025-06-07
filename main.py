@@ -740,7 +740,6 @@ async def fetch_rendered_html_playwright(
                         ]
                     ):
                         if url not in video_requests:
-                            logging.debug(f"STREAM RESPONSE - Found stream: {url}")
                             video_requests.append(url)
                 except Exception as e:
                     logging.error(f"STREAM RESPONSE ERROR - {e}")
@@ -866,6 +865,11 @@ async def fetch_rendered_html_playwright(
                     await page.close()
             except Exception as e:
                 logging.error(f"PAGE CLOSE ERROR - {e}")
+
+        if video_requests:
+            logging.debug(
+                f"STREAM RESPONSE - {len(set(video_requests))} stream(s) from {url}"
+            )
 
         return content, [v for v in set(video_requests) if not v.startswith("blob:")]
 
