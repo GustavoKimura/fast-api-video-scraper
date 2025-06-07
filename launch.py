@@ -36,13 +36,17 @@ def check_docker():
         sys.exit(1)
 
 
-def run_compose(path: str, name: str):
+def run_compose(path: str, name: str, build=False):
     base_msg = f"{name} → launching"
     log("build", base_msg, end="")
 
+    cmd = ["docker", "compose", "up", "-d"]
+    if build:
+        cmd.insert(3, "--build")
+
     try:
         process = subprocess.Popen(
-            ["docker", "compose", "up", "--build", "-d"],
+            cmd,
             cwd=path,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -101,8 +105,8 @@ def open_browser(url="http://localhost:8000"):
 def main():
     log("info", "=== 🚀 FastAPI Scraper Bootstrap ===")
     check_docker()
-    run_compose("searxng", "SearXNG")
-    run_compose(".", "Search Engine Backend")
+    run_compose("searxng", "SearXNG", build=False)
+    run_compose(".", "Search Engine Backend", build=False)
     wait_for_service("localhost", 8000)
     open_browser()
     log("success", "🎉 All systems operational!")
