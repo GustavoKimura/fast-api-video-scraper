@@ -551,6 +551,17 @@ async def deduplicate_videos(videos: list[dict]) -> list[dict]:
 async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
     async def _internal_fetch_with_playwright(url, timeout):
         browser = None
+        video_requests = []
+
+        async def intercept_video_requests(route):
+            req_url = route.request.url
+            if any(
+                ext in req_url.lower()
+                for ext in [".mp4", ".webm", ".m3u8", ".mov", ".ts"]
+            ):
+                print(f"[INTERCEPT] Video URL: {req_url}")
+                video_requests.append(req_url)
+            await route.continue_()
 
         async with async_playwright() as p:
             try:
@@ -574,7 +585,7 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                 bypass_csp=True,
                 locale="en-US",
             )
-
+            await context.route("**/*", intercept_video_requests)
             page = await context.new_page()
             page.set_default_navigation_timeout(timeout)
 
@@ -586,25 +597,131 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
             try:
                 await page.goto(url, timeout=timeout)
                 await page.wait_for_load_state("domcontentloaded", timeout=timeout)
-
-                for _ in range(3):
-                    await page.evaluate(
-                        "window.scrollBy(0, document.body.scrollHeight)"
-                    )
-                    await page.wait_for_timeout(800)
-
-                await auto_bypass_consent_dialog(page)
-
-                html = await page.content()
-                return html
             except Exception as e:
-                print(f"[PLAYWRIGHT ERROR] Failed to load {url}: {e}")
+                print(f"[NAVIGATION ERROR] {url}: {e}")
                 return ""
+
+            try:
+                await page.wait_for_selector("video source[src]", timeout=8000)
+            except:
+                print("[INFO] No <source> tag found directly.")
+
+            video_src = await page.evaluate(
+                """
+                () => {
+                    const sources = document.querySelectorAll("video source[src]");
+                    if (sources.length > 0) return sources[0].src;
+
+                    const scripts = Array.from(document.scripts).map(s => s.textContent).join("\n");
+                    const match = scripts.match(/"file"\s*:\s*"([^"]+\.(mp4|webm|m3u8))"/i);
+                    return match ? match[1] : null;
+                }
+                """
+            )
+            if video_src:
+                await page.evaluate(
+                    f"""
+                    let v = document.createElement('video');
+                    let s = document.createElement('source');
+                    s.src = "{video_src}";
+                    v.appendChild(s);
+                    document.body.appendChild(v);
+                    """
+                )
+                print(f"[JS VIDEO SRC] Injected src: {video_src}")
+
+            try:
+                await page.evaluate(
+                    """
+                    document.querySelectorAll('button, .play, .video-play, .btn-play, .vjs-big-play-button, .player-button')
+                    .forEach(el => { try { el.click(); } catch (e) {} });
+                    """
+                )
+                await page.wait_for_timeout(1500)
+            except Exception as e:
+                print(f"[CLICK SIMULATION ERROR] {e}")
+
+            for _ in range(3):
+                await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(800)
+
+            await auto_bypass_consent_dialog(page)
+
+            for v_url in set(video_requests):
+                await page.evaluate(
+                    f"""
+                    let v = document.createElement('video');
+                    let s = document.createElement('source');
+                    s.src = "{v_url}";
+                    v.appendChild(s);
+                    document.body.appendChild(v);
+                    """
+                )
+
+            processed_iframe_urls = set()
+
+            for frame in page.frames:
+                if frame == page.main_frame:
+                    continue
+
+                try:
+                    frame_url = frame.url
+                    if "about:blank" in frame_url or frame_url in processed_iframe_urls:
+                        continue
+
+                    processed_iframe_urls.add(frame_url)
+
+                    try:
+                        frame_html = await frame.content()
+                    except:
+                        frame_html = ""
+
+                    if not frame_html.strip():
+                        print(
+                            f"[IFRAME - CROSS DOMAIN] Attempting direct scrape: {frame_url}"
+                        )
+                        try:
+                            alt_html = await _internal_fetch_with_playwright(
+                                frame_url, timeout // 2
+                            )
+                            if alt_html:
+                                video_frame_srcs = extract_video_sources(
+                                    alt_html, frame_url
+                                )
+                                for v_url in video_frame_srcs:
+                                    await page.evaluate(
+                                        f"""
+                                        let v = document.createElement('video');
+                                        let s = document.createElement('source');
+                                        s.src = "{v_url}";
+                                        v.appendChild(s);
+                                        document.body.appendChild(v);
+                                    """
+                                    )
+                        except Exception as e:
+                            print(f"[IFRAME ERROR - REFETCH] {frame_url}: {e}")
+                        continue
+
+                    video_frame_srcs = extract_video_sources(frame_html, frame_url)
+                    for v_url in video_frame_srcs:
+                        await page.evaluate(
+                            f"""
+                            let v = document.createElement('video');
+                            let s = document.createElement('source');
+                            s.src = "{v_url}";
+                            v.appendChild(s);
+                            document.body.appendChild(v);
+                        """
+                        )
+                except Exception as e:
+                    print(f"[IFRAME ERROR] {frame.url}: {e}")
+
+            return await page.content()
 
     for attempt in range(retries + 1):
         try:
             html = await _internal_fetch_with_playwright(url, timeout)
-            if html.strip():
+            if html and html.strip():
                 return html
         except Exception as e:
             print(f"[RETRY {attempt}] Playwright failed: {e}")
