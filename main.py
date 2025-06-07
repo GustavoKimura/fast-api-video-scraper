@@ -14,8 +14,9 @@ from playwright.async_api import async_playwright
 from boilerpy3 import extractors
 from numpy import dot
 from numpy.linalg import norm
-from collections import defaultdict
+from collections import defaultdict, Counter
 from typing import List, Tuple
+from itertools import combinations
 
 # === 🔒 DOMAIN CONCURRENCY CONTROL ===
 domain_counters = defaultdict(lambda: asyncio.Semaphore(4))
@@ -90,6 +91,24 @@ model_embed = OpenCLIPEmbedder(model_name="ViT-B-32", pretrained="laion2b_s34b_b
 kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
 
 
+def expand_query_semantically(query: str, top_n: int = 5) -> List[str]:
+    raw_keywords = kw_model.extract_keywords(
+        query,
+        keyphrase_ngram_range=(1, 3),
+        use_mmr=True,
+        diversity=0.8,
+        top_n=top_n,
+    )
+
+    keywords = []
+    for kw in raw_keywords:
+        if isinstance(kw, tuple) and isinstance(kw[0], str):
+            if kw[0].lower() != query.lower():
+                keywords.append(kw[0])
+
+    return [query] + keywords
+
+
 # === 🧩 SEMANTIC RANKING ===
 def cosine_sim(a, b):
     return float(dot(a, b) / (norm(a) * norm(b) + 1e-8))
@@ -97,8 +116,10 @@ def cosine_sim(a, b):
 
 def rank_by_similarity(results, query_embed, min_duration=30, max_duration=1800):
     query_tags = set(extract_tags(query_embed))
-    final = []
+    tag_boosts = boost_by_tag_cooccurrence(results)
+    seen_domains = set()
 
+    final = []
     for r in results:
         if r.get("duration"):
             dur_secs = duration_to_seconds(r["duration"])
@@ -111,7 +132,15 @@ def rank_by_similarity(results, query_embed, min_duration=30, max_duration=1800)
             tag_embed = model_embed.encode(tag_text)
             sim = cosine_sim(query_embed, tag_embed)
             overlap = len(query_tags.intersection(set(r["tags"])))
-            score = sim + 0.05 * overlap
+            boost = sum(tag_boosts.get(tag, 0) for tag in r["tags"])
+            score = sim + 0.05 * overlap + boost
+
+        domain = get_main_domain(r["url"])
+        if domain in seen_domains:
+            score *= 0.85
+        else:
+            seen_domains.add(domain)
+
         r["score"] = score
         final.append(r)
 
@@ -121,11 +150,12 @@ def rank_by_similarity(results, query_embed, min_duration=30, max_duration=1800)
 def rank_deep_links(links, query_embed):
     scored = []
     for link in links:
-        title_snippet = re.sub(r"[-_/]", " ", link.split("/")[-1])
-        embed = model_embed.encode(title_snippet)
+        snippet = re.sub(r"[-_/]", " ", link.split("/")[-1])
+        embed = model_embed.encode(snippet)
         sim = cosine_sim(query_embed, embed)
         scored.append((sim, link))
-    return [link for _, link in sorted(scored, reverse=True)[:5]]
+    scored.sort(reverse=True)
+    return [link for _, link in scored[:5]]
 
 
 # === 🔧 UTILITIES ===
@@ -221,6 +251,23 @@ def extract_tags(text: str, top_n: int = 10) -> List[Tuple[str, float]]:
         return raw_results  # type: ignore
 
     return []
+
+
+def boost_by_tag_cooccurrence(results):
+    co_pairs = Counter()
+    for r in results:
+        tags = list(set(r.get("tags", [])))
+        for a, b in combinations(sorted(tags), 2):
+            co_pairs[(a, b)] += 1
+
+    tag_boosts = {}
+    for (a, b), count in co_pairs.items():
+        if count >= 2:
+            tag_boosts.setdefault(a, 0)
+            tag_boosts.setdefault(b, 0)
+            tag_boosts[a] += 0.05
+            tag_boosts[b] += 0.05
+    return tag_boosts
 
 
 # === 🌐 RENDER + EXTRACT ===
@@ -403,12 +450,24 @@ def extract_video_sources(html, base_url):
         ):
             sources.add(urljoin(base_url, str(src)))
 
-    for tag in soup.find_all(attrs={"data-src": True}):
-        if not isinstance(tag, Tag):
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            if not isinstance(script, Tag):
+                continue
+
+            if not isinstance(script.string, str):
+                continue
+
+            import json
+
+            data = json.loads(script.string)
+
+            if isinstance(data, dict) and data.get("@type") == "VideoObject":
+                url = data.get("contentUrl") or data.get("embedUrl")
+                if url and re.search(r"\.(mp4|webm|m3u8|mov)", url):
+                    sources.add(url)
+        except:
             continue
-        src = tag["data-src"]
-        if re.search(r"\.(mp4|webm|m3u8|mov)", str(src)):
-            sources.add(urljoin(base_url, str(src)))
 
     return list(sources)
 
@@ -487,6 +546,7 @@ async def search_engine_async(query, link_count):
 
 
 async def advanced_search_async(query):
+    expanded_queries = expand_query_semantically(query)
     query_embed = model_embed.encode(query)
     all_links, results, processed = [], [], set()
     collected, sem = set(), asyncio.Semaphore(MAX_PARALLEL_TASKS)
@@ -509,12 +569,13 @@ async def advanced_search_async(query):
             break
 
         if i >= len(all_links):
-            links = await search_engine_async(query, LINKS_TO_SCRAP)
-            new_links = [u for u in links if u not in collected]
-            if not new_links:
-                break
-            all_links += new_links
-            collected.update(new_links)
+            for q in expanded_queries:
+                links = await search_engine_async(
+                    q, LINKS_TO_SCRAP // len(expanded_queries)
+                )
+                new_links = [u for u in links if u not in collected]
+                all_links += new_links
+                collected.update(new_links)
 
         while i < len(all_links) and len(tasks) < MAX_PARALLEL_TASKS:
             url = all_links[i]
