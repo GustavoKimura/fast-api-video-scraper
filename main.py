@@ -268,7 +268,8 @@ def duration_to_seconds(duration_str: str):
         return 0
 
 
-async def get_video_duration(url: str):
+async def get_video_duration(url: str, html: str = "") -> float:
+    # Try ffprobe first
     async with ffprobe_sem:
         try:
             cmd = [
@@ -288,10 +289,31 @@ async def get_video_duration(url: str):
             )
             stdout, _ = await proc.communicate()
             duration_str = stdout.decode().strip()
-            return float(duration_str) if duration_str else 0.0
+            duration = float(duration_str)
+            if duration > 0:
+                return duration
         except Exception as e:
             print(f"[FFPROBE ERROR] {url}: {e}")
-            return 0.0
+
+    if html:
+        try:
+            soup = BeautifulSoup(html, "lxml")
+            duration_meta = soup.find("meta", attrs={"property": "og:video:duration"})
+            if (
+                isinstance(duration_meta, Tag)
+                and duration_meta
+                and duration_meta.get("content")
+            ):
+                return float(str(duration_meta["content"]))
+        except Exception as e:
+            print(f"[META-DURATION ERROR] {url}: {e}")
+
+    match = re.search(r"(\d+)[-_]?min", url.lower())
+    if match:
+        minutes = int(match.group(1))
+        return float(minutes * 60)
+
+    return 0.0
 
 
 def extract_tags(text: str, top_n: int = 10):
@@ -731,11 +753,11 @@ async def extract_video_metadata(url, query_embed):
 
     videos = []
     for video_url in video_links:
-        duration = await get_video_duration(video_url)
+        duration = await get_video_duration(video_url, html)
         if duration == 0.0:
             print(f"[DURATION WARNING] No valid duration found for {url}")
 
-        if not meta["title"].strip() or duration == 0 or len(tags) < 2:
+        if not meta["title"].strip() or duration == 0 or len(tags) < 1:
             print(f"[SKIP] Rejecting low-quality video: {video_url}")
             continue
 
@@ -744,7 +766,7 @@ async def extract_video_metadata(url, query_embed):
                 "url": video_url,
                 "title": meta["title"] or urlparse(video_url).path.split("/")[-1],
                 "tags": tags,
-                "duration": str(int(duration)),
+                "duration": f"{duration:.2f}",
                 "score": 0.0,
             }
         )
@@ -792,7 +814,7 @@ async def search_videos_async(query="4k videos", videos_to_search: int = 1):
         async with sem, domain_counters[domain]:
             try:
                 result = await asyncio.wait_for(
-                    extract_video_metadata(url, query_embed), timeout=60
+                    extract_video_metadata(url, query_embed), timeout=120
                 )
                 if not result or not result.get("videos"):
                     print(f"[WORKER] No usable result for: {url}")
