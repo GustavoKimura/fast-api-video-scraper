@@ -105,7 +105,7 @@ def open_browser(url="http://localhost:8000"):
 def main():
     log("info", "=== 🚀 FastAPI Scraper Bootstrap ===")
     check_docker()
-    run_compose("searxng", "SearXNG", build=False)
+    run_compose(".", "SearXNG", build=False)
     run_compose(".", "Search Engine Backend", build=False)
     wait_for_service("localhost", 8000)
     open_browser()
