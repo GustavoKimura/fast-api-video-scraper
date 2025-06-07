@@ -58,8 +58,6 @@ def dynamic_parallel_task_limit():
 
 
 MAX_PARALLEL_TASKS = dynamic_parallel_task_limit()
-VIDEOS_TO_SEARCH = 10
-VIDEO_RESULTS_LIMIT = 5
 DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 content_extractor = extractors.LargestContentExtractor()
@@ -744,7 +742,7 @@ async def search_engine_async(query, link_count):
             ][:link_count]
 
 
-async def search_videos_async(query):
+async def search_videos_async(query="4k videos", videos_to_search: int = 1):
     expanded_queries = list(dict.fromkeys(expand_query_semantically(query)))
     print(f"[DEBUG] Expanded queries: {expanded_queries}")
 
@@ -761,7 +759,7 @@ async def search_videos_async(query):
                 result = await asyncio.wait_for(
                     extract_video_metadata(url, query_embed), timeout=60
                 )
-                if not result or not result.get("video_links"):
+                if not result or not result.get("videos"):
                     print(f"[WORKER] No usable result for: {url}")
                     return None
                 processed.add(url)
@@ -778,7 +776,7 @@ async def search_videos_async(query):
     max_time = 90
     start_time = time.monotonic()
 
-    while len(results) < VIDEO_RESULTS_LIMIT:
+    while len(results) < videos_to_search:
         elapsed = time.monotonic() - start_time
         if elapsed > max_time:
             print("[LOOP] Max time reached, exiting loop.")
@@ -787,7 +785,7 @@ async def search_videos_async(query):
         if i >= len(all_links):
             print("[LOOP] Fetching more links for expanded queries...")
 
-            needed = VIDEO_RESULTS_LIMIT - len(results)
+            needed = videos_to_search - len(results)
             cores = os.cpu_count() or 4
             ram_gb = psutil.virtual_memory().total // 1_073_741_824
             base_multiplier = 1 + (cores // 4) + (ram_gb // 8)
@@ -863,12 +861,11 @@ def index():
 
 @app.get("/search")
 async def search(query: str = "", power_scraping: bool = False):
-    global VIDEO_RESULTS_LIMIT
-
-    VIDEO_RESULTS_LIMIT = min((os.cpu_count() or 4) * 10, 500) if power_scraping else 1
-
     print("=== STARTING SEARCH ===")
-    results = await search_videos_async(query)
+    results = await search_videos_async(
+        query,
+        videos_to_search=min((os.cpu_count() or 4) * 10, 500) if power_scraping else 1,
+    )
     print(f"[RESULTS] Total results fetched: {len(results)}")
 
     video_results = [r for r in results if r.get("videos")]
