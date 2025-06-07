@@ -1,5 +1,5 @@
 # === 📦 IMPORTS ===
-import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura
+import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json
 from urllib.parse import urlparse, urlunparse, urljoin
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -766,9 +766,6 @@ def index():
 
 @app.get("/search")
 async def search(query: str = "", power_scraping: bool = False):
-    print(
-        "----------------------------------------------------------------------------------------------------"
-    )
     global VIDEOS_TO_SEARCH, VIDEO_RESULTS_LIMIT
 
     if power_scraping:
@@ -779,6 +776,7 @@ async def search(query: str = "", power_scraping: bool = False):
         VIDEOS_TO_SEARCH = 5
         VIDEO_RESULTS_LIMIT = 1
 
+    print("=== STARTING SEARCH ===")
     results = await search_videos_async(query)
     print(f"[RESULTS] Total results fetched: {len(results)}")
 
@@ -799,7 +797,8 @@ async def search(query: str = "", power_scraping: bool = False):
 
     results = rank_by_similarity(results, query)
     print(f"[RANKING] Results ranked by semantic similarity to query")
-
+    print("=== FINAL RESULTS JSON ===")
+    print(json.dumps(results, indent=2))
     return JSONResponse(
         content=[
             {
