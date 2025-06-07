@@ -351,7 +351,7 @@ def extract_keywords(text: str, top_n: int = 10, diversity=0.7):
 
 
 # === 🌐 RENDER + EXTRACT ===
-async def fetch_rendered_html_playwright(url, timeout=90000):
+async def fetch_rendered_html_playwright(url, timeout=150000):
     browser = None
     try:
         os.makedirs("screenshots", exist_ok=True)
@@ -387,6 +387,7 @@ async def fetch_rendered_html_playwright(url, timeout=90000):
 
             try:
                 await page.goto(url, timeout=timeout)
+                await page.wait_for_selector("video", timeout=10000)
                 await page.wait_for_load_state("networkidle")
                 await auto_bypass_consent_dialog(page)
                 html = await page.content()
@@ -750,12 +751,19 @@ async def search_videos_async(query):
             break
 
         if i >= len(all_links):
-            print("[LOOP] Fetching new links for expanded queries...")
+            print("[LOOP] Fetching more links for expanded queries...")
+
+            needed = VIDEO_RESULTS_LIMIT - len(results)
+            cores = os.cpu_count() or 4
+            ram_gb = psutil.virtual_memory().total // 1_073_741_824
+            base_multiplier = 1 + (cores // 4) + (ram_gb // 8)
+            multiplier = max(2, min(base_multiplier, 6))
+            estimated_needed_links = max(5, multiplier * needed)
+            per_query = max(1, estimated_needed_links // len(expanded_queries))
+
             for q in expanded_queries:
                 try:
-                    links = await search_engine_async(
-                        q, VIDEOS_TO_SEARCH // len(expanded_queries)
-                    )
+                    links = await search_engine_async(q, per_query)
                     new_links = [u for u in links if u not in collected]
                     all_links += new_links
                     collected.update(new_links)
@@ -821,15 +829,9 @@ def index():
 
 @app.get("/search")
 async def search(query: str = "", power_scraping: bool = False):
-    global VIDEOS_TO_SEARCH, VIDEO_RESULTS_LIMIT
+    global VIDEO_RESULTS_LIMIT
 
-    if power_scraping:
-        cores = os.cpu_count() or 4
-        VIDEOS_TO_SEARCH = min(cores * 30, 1000)
-        VIDEO_RESULTS_LIMIT = min(cores * 10, 500)
-    else:
-        VIDEOS_TO_SEARCH = 5
-        VIDEO_RESULTS_LIMIT = 1
+    VIDEO_RESULTS_LIMIT = min((os.cpu_count() or 4) * 10, 500) if power_scraping else 1
 
     print("=== STARTING SEARCH ===")
     results = await search_videos_async(query)
