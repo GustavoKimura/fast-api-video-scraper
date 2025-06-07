@@ -313,6 +313,12 @@ async def get_video_duration(url: str, html: str = "") -> float:
         minutes = int(match.group(1))
         return float(minutes * 60)
 
+    match = re.search(r'"duration"\s*:\s*"PT(\d+)M(\d+)S"', html)
+    if match:
+        minutes = int(match.group(1))
+        seconds = int(match.group(2))
+        return minutes * 60 + seconds
+
     return 0.0
 
 
@@ -851,14 +857,23 @@ async def extract_video_metadata(url, query_embed):
         if duration == 0.0:
             print(f"[DURATION WARNING] No valid duration found for {url}")
 
-        if not meta["title"].strip() or duration == 0 or len(tags) < 1:
-            print(f"[SKIP] Rejecting low-quality video: {video_url}")
-            continue
+        if duration == 0:
+            print(f"[WARNING] Accepting video with unknown duration: {video_url}")
+
+        if not tags:
+            print(f"[WARNING] Accepting video with no tags: {video_url}")
+
+        if not meta["title"].strip():
+            print(
+                f"[WARNING] Accepting video with no title, fallback to URL: {video_url}"
+            )
+
+        title = meta["title"] or urlparse(video_url).path.split("/")[-1] or "Untitled"
 
         videos.append(
             {
                 "url": video_url,
-                "title": meta["title"] or urlparse(video_url).path.split("/")[-1],
+                "title": title,
                 "tags": tags,
                 "duration": f"{duration:.2f}",
                 "score": 0.0,
@@ -1033,7 +1048,12 @@ def index():
 @app.get("/search")
 async def search(query: str = "", power_scraping: bool = False):
     print("=== STARTING SEARCH ===")
-    videos_to_return = min((os.cpu_count() or 4) * 10, 500) if power_scraping else 1
+    MINIMUM_VIDEOS_TO_RETURN = 5
+    videos_to_return = (
+        min((os.cpu_count() or 4) * 10, 500)
+        if power_scraping
+        else MINIMUM_VIDEOS_TO_RETURN
+    )
     results = await search_videos_async(
         query,
         videos_to_return,
