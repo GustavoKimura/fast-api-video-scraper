@@ -83,6 +83,31 @@ BLOCKED_DOMAINS = {
 
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
+VIDEO_HINTS = [
+    "/video/",
+    "/videos/",
+    "/media/",
+    "/watch/",
+    "/view/",
+    "/play/",
+    "/embed/",
+    "/clip/",
+    "/v/",
+    "viewkey=",
+    "vid=",
+    "videoid=",
+    ".mp4",
+    ".webm",
+    ".m3u8",
+    ".mov",
+    "cdn.videos",
+    "stream=",
+    "media?id=",
+    "/file/",
+    "/stream/",
+    "/content/video/",
+]
+
 
 # === 🧠 MODELS ===
 class OpenCLIPEmbedder:
@@ -206,10 +231,13 @@ def get_main_domain(url):
 def is_valid_link(url):
     domain = get_main_domain(url).lower()
     if domain in BLOCKED_DOMAINS:
+        print(f"[SKIP] Blocked domain: {domain}")
         return False
     if not url.startswith(("http://", "https://")):
+        print(f"[SKIP] {url} not starts with: http:// or https://")
         return False
     if any(c in url for c in ['"', "'", "\\", " "]):
+        print(f"[SKIP] {url} broken")
         return False
     if url.split("?")[0].split("#")[0].split(".")[-1] in [
         "pdf",
@@ -219,6 +247,7 @@ def is_valid_link(url):
         "rar",
         "ppt",
     ]:
+        print(f"[SKIP] {url} is pdf, doc, xls, zip, rar or ppt")
         return False
     return True
 
@@ -301,6 +330,11 @@ def boost_by_tag_cooccurrence(results):
     return tag_boosts
 
 
+def is_probable_video_url(url: str) -> bool:
+    url = url.lower()
+    return any(hint in url for hint in VIDEO_HINTS)
+
+
 # === 🌐 RENDER + EXTRACT ===
 async def fetch_rendered_html_playwright(url, timeout=30000):
     try:
@@ -321,7 +355,6 @@ async def fetch_rendered_html_playwright(url, timeout=30000):
                 bypass_csp=True,
                 locale="en-US",
             )
-
             page = await context.new_page()
 
             try:
@@ -333,27 +366,35 @@ async def fetch_rendered_html_playwright(url, timeout=30000):
 
             await page.goto(url, timeout=timeout)
             await page.wait_for_load_state("networkidle")
+
+            for _ in range(5):
+                await page.mouse.wheel(0, 1500)
+                await page.wait_for_timeout(1000)
+
+            try:
+                await page.wait_for_selector("video", timeout=5000)
+            except:
+                print(f"[DEBUG] No <video> found in initial viewport for {url}")
+
+            await page.wait_for_load_state("networkidle")
             await page.mouse.wheel(0, 5000)
             await page.wait_for_timeout(2000)
             await page.mouse.click(640, 360)
             await page.wait_for_timeout(5000)
-            html = await page.content()
-            await browser.close()
 
-            if any(
-                s in html.lower()
-                for s in [
-                    "captcha",
-                    "cf-chl-bypass",
-                    "turnstile",
-                    "checking your browser",
-                ]
-            ):
-                return ""
+            html = await page.content()
+            if not html.strip():
+                print(f"[DEBUG] Empty HTML from {url}")
             return html
+
     except Exception as e:
         print(f"[Playwright Error] {url}: {e}")
         return ""
+    finally:
+        try:
+            await browser.close()
+        except:
+            pass
 
 
 def preprocess_html(html):
@@ -442,16 +483,14 @@ def extract_deep_links(html: str, base_url: str) -> list[str]:
     for a in soup.find_all("a", href=True):
         if not isinstance(a, Tag):
             continue
+
         href = a["href"]
         full_url = urljoin(base_url, str(href))
 
         if not is_valid_link(full_url):
             continue
 
-        if any(
-            k in full_url.lower()
-            for k in ["/watch", "/view", "/video", "viewkey=", ".mp4", ".m3u8"]
-        ):
+        if is_probable_video_url(full_url):
             urls.add(full_url)
 
     return list(urls)[:10]
@@ -464,7 +503,14 @@ def extract_video_sources(html, base_url):
     for tag in soup.find_all(["video", "source"]):
         if not isinstance(tag, Tag):
             continue
-        src = tag.get("src") or tag.get("data-src")
+        print(f"[DEBUG] Raw video tag: {str(tag)}")
+        src = (
+            tag.get("src")
+            or tag.get("data-src")
+            or tag.get("data-hd-src")
+            or tag.get("data-video-url")
+            or ""
+        )
         if src:
             full_url = urljoin(base_url, str(src))
             if re.search(r"\.(mp4|webm|m3u8|mov)", full_url):
@@ -489,6 +535,9 @@ def extract_video_sources(html, base_url):
             if not isinstance(script.string, str):
                 continue
 
+            if "video_files" in script.string or "video_url" in script.string:
+                print("[DEBUG] Possible embedded video JSON found")
+
             import json
 
             data = json.loads(script.string)
@@ -500,14 +549,23 @@ def extract_video_sources(html, base_url):
         except:
             continue
 
-    return list(sources)
+    return list(dict.fromkeys(sorted(sources)))
 
 
 async def process_url_async(url, query_embed):
     if not is_valid_link(url):
         return None
     html = await fetch_rendered_html_playwright(url)
+    print(f"[DEBUG] HTML length from {url}: {len(html)}")
+    video_links = extract_video_sources(html, url)
+    soup = BeautifulSoup(html, "lxml")
+    video_elements = soup.find_all(["video", "source"])
+    print(
+        f"[DEBUG] HTML from {url} contains {len(video_elements)} <video>/<source> tags"
+    )
+    print(f"[DEBUG] Found {len(video_links)} video sources at {url}: {video_links}")
     deep_links = rank_deep_links(extract_deep_links(html, url), query_embed)
+    print(f"[DEBUG] Deep links from {url}: {deep_links}")
 
     for deep_url in deep_links[:5]:
         deep_html = await fetch_rendered_html_playwright(deep_url)
@@ -523,6 +581,7 @@ async def process_url_async(url, query_embed):
             break
 
     text = content_extractor.get_content(html)
+    print(f"[DEBUG] Extracted text length: {len(text)} from {url}")
     if len(text) < 200:
         try:
             text = content_extractor.get_content(
@@ -545,10 +604,11 @@ async def process_url_async(url, query_embed):
     text_hash = hashlib.md5(text.encode()).hexdigest()
     meta = await extract_metadata(html)
     tags = auto_generate_tags_from_text(f"{text.strip()} {meta['title']}", top_k=10)
+    print(f"[DEBUG] HTML from {url} contains {len(tags)} <video>/<source> tags")
     result = {
         "url": url,
         "summary": text.strip(),
-        "video_links": extract_video_sources(html, url),
+        "video_links": video_links,
         "hash": text_hash,
         "title": meta["title"],
         "description": meta["description"],
@@ -556,6 +616,9 @@ async def process_url_async(url, query_embed):
         "language": "en",
         "tags": tags,
     }
+
+    if not result["video_links"]:
+        print(f"[DEBUG] No video sources found at {url}")
 
     return result
 
@@ -590,6 +653,8 @@ async def advanced_search_async(query):
                 result = await asyncio.wait_for(
                     process_url_async(url, query_embed), timeout=12
                 )
+                if not result:
+                    print(f"[DEBUG] Failed to extract usable video from: {url}")
                 if result and result.get("hash") not in seen_hashes:
                     seen_hashes.add(result["hash"])
                     return result
@@ -609,6 +674,7 @@ async def advanced_search_async(query):
                 links = await search_engine_async(
                     q, LINKS_TO_SCRAP // len(expanded_queries)
                 )
+                print("[DEBUG] Links fetched:", links)
                 new_links = [u for u in links if u not in collected]
                 all_links += new_links
                 collected.update(new_links)
