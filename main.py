@@ -80,6 +80,10 @@ BLOCKED_DOMAINS = {
     "reuters.com",
     "bloomberg.com",
     "marketwatch.com",
+    "reddit.com",
+    "google.com",
+    "support.google.com",
+    "zhihu.com",
 }
 
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
@@ -240,13 +244,10 @@ def get_main_domain(url):
 def is_valid_link(url):
     domain = get_main_domain(url).lower()
     if domain in BLOCKED_DOMAINS:
-        print(f"[SKIP] Blocked domain: {domain}")
         return False
     if not url.startswith(("http://", "https://")):
-        print(f"[SKIP] {url} not starts with: http:// or https://")
         return False
     if any(c in url for c in ['"', "'", "\\", " "]):
-        print(f"[SKIP] {url} broken")
         return False
     if url.split("?")[0].split("#")[0].split(".")[-1] in [
         "pdf",
@@ -256,7 +257,6 @@ def is_valid_link(url):
         "rar",
         "ppt",
     ]:
-        print(f"[SKIP] {url} is pdf, doc, xls, zip, rar or ppt")
         return False
     return True
 
@@ -351,20 +351,70 @@ def is_probable_video_url(url: str):
     )
 
 
+def safe_filename(url: str, with_timestamp: bool = True) -> str:
+    import datetime
+
+    name = re.sub(r"[^\w\-_.]", "_", url)
+    if with_timestamp:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        name += f"_{timestamp}"
+    return name[:150]
+
+
+async def auto_bypass_consent_dialog(page):
+    try:
+        await page.wait_for_timeout(1000)
+
+        selectors = [
+            "text=Enter",
+            "text=I Agree",
+            "text=Continue",
+            "text=Yes",
+            "text=Proceed",
+            "button:has-text('Enter')",
+            "button:has-text('Continue')",
+            "button:has-text('Accept')",
+            "button:has-text('OK')",
+            "button:has-text('Got it')",
+            "button:has-text('Agree')",
+        ]
+
+        for selector in selectors:
+            try:
+                element = await page.query_selector(selector)
+                if element:
+                    print(f"[CONSENT] Clicking selector: {selector}")
+                    await element.click(force=True)
+                    await page.wait_for_timeout(1000)
+                    break
+            except Exception as e:
+                print(f"[CONSENT WARNING] Could not click {selector}: {e}")
+    except Exception as e:
+        print(f"[CONSENT ERROR] {e}")
+
+
 # === 🌐 RENDER + EXTRACT ===
-async def fetch_rendered_html_playwright(url, timeout=60000):
+async def fetch_rendered_html_playwright(url, timeout=90000):
+    print(f"[PLAYWRIGHT] Starting fetch for {url}")
     browser = None
     try:
+        os.makedirs("screenshots", exist_ok=True)
+
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-web-security",
-                ],
-            )
+            try:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-web-security",
+                    ],
+                )
+            except Exception as e:
+                print(f"[PLAYWRIGHT ERROR] Launch failed: {e}")
+                return ""
+
             context = await browser.new_context(
                 user_agent=get_user_agent(),
                 viewport={"width": 1280, "height": 720},
@@ -372,117 +422,36 @@ async def fetch_rendered_html_playwright(url, timeout=60000):
                 bypass_csp=True,
                 locale="en-US",
             )
+
             page = await context.new_page()
 
             try:
                 await stealth_async(page)
-            except:
-                pass
+            except Exception as e:
+                print(f"[PLAYWRIGHT WARNING] Failed to apply stealth: {e}")
 
-            await page.goto(url, timeout=timeout)
             try:
-                candidate_links = await page.query_selector_all("a[href]")
-                scored_links = []
-                for link in candidate_links:
-                    href = await link.get_attribute("href")
-                    if not href or not is_probable_video_url(href):
-                        continue
-                    text = await link.inner_text() or ""
-                    snippet = text.strip() or href.split("/")[-1]
-                    sim = cosine_sim(
-                        model_embed.encode(snippet), model_embed.encode(url)
-                    )
-                    scored_links.append((sim, urljoin(url, href)))
-                for _, best_link in scored_links[:3]:
-                    try:
-                        print(f"[AUTO-NAV] Trying video subpage: {best_link}")
-                        await page.goto(best_link, timeout=timeout)
-                        await page.wait_for_load_state("networkidle")
-                        await page.wait_for_timeout(3000)
-                        sub_html = await page.content()
-                        if (
-                            "<video" in sub_html
-                            or "jwplayer" in sub_html
-                            or "m3u8" in sub_html
-                        ):
-                            return sub_html
-                    except Exception as e:
-                        print(f"[AUTO-NAV] Failed to extract from {best_link}: {e}")
+                await page.goto(url, timeout=timeout)
+                await page.wait_for_load_state("networkidle")
+                await auto_bypass_consent_dialog(page)
+                html = await page.content()
+                print(f"[PLAYWRIGHT] HTML content fetched from {url} (len={len(html)})")
+
+                return html
 
             except Exception as e:
-                print(f"[WARNING] Smart link follow failed: {e}")
-
-            await page.wait_for_load_state("networkidle")
-
-            for _ in range(10):
-                await page.mouse.wheel(0, 2500)
-                await page.wait_for_timeout(1000)
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(2000)
-
-            try:
-                await page.wait_for_selector("video", timeout=15000)
-                await page.wait_for_selector("iframe[src*='embed']", timeout=5000)
-                await page.wait_for_selector(
-                    "script[type='application/ld+json']", timeout=5000
-                )
-            except:
-                print(f"[DEBUG] No <video> found in initial viewport for {url}")
-
-            await page.wait_for_selector(
-                "a[href*='video'], a[href*='view']", timeout=5000
-            )
-            await page.wait_for_load_state("networkidle")
-            await page.mouse.wheel(0, 5000)
-            await page.wait_for_timeout(2000)
-            await page.mouse.click(640, 360)
-            await page.wait_for_timeout(5000)
-
-            anchors = await page.query_selector_all("a")
-            for a in anchors[:20]:
-                href = await a.get_attribute("href")
-                print("[ANCHOR]", href)
-
-            html = await page.content()
-
-            if "document.location" in html.lower() or "redirecting" in html.lower():
-                print(f"[WARNING] JavaScript redirect trap on {url}")
+                print(f"[PLAYWRIGHT ERROR] Failed to load {url}: {e}")
                 return ""
-
-            if "cf-challenge" in html or "captcha" in html.lower():
-                print(f"[WARNING] Possible anti-bot wall on {url}")
-
-            if not html.strip():
-                print(f"[DEBUG] Empty HTML from {url}")
-
-                import re, os
-
-                def safe_filename(url):
-                    name = re.sub(r"[^\w\-_.]", "_", url)
-                    return name[:100]
-
-                os.makedirs("screenshots", exist_ok=True)
-                try:
-                    await page.screenshot(
-                        path=f"screenshots/{safe_filename(url)}.png", full_page=True
-                    )
-                    print(f"[SCREENSHOT SAVED] screenshots/{safe_filename(url)}.png")
-                except Exception as e:
-                    print(f"[SCREENSHOT ERROR] Failed to capture screenshot: {e}")
-
-                return ""
-
-            return html
 
     except Exception as e:
-        print(f"[Playwright Error] {url}: {e}")
+        print(f"[PLAYWRIGHT FATAL] {url}: {e}")
         return ""
     finally:
         if browser:
             try:
                 await browser.close()
             except:
-                pass
+                print(f"[PLAYWRIGHT WARNING] Failed to close browser for {url}")
 
 
 def preprocess_html(html):
@@ -583,9 +552,7 @@ def extract_deep_links(html: str, base_url: str) -> list[str]:
         ):
             urls.add(full_url)
 
-    print("[DEBUG] Deep candidate links from homepage:")
-    for link in sorted(urls):
-        print("  -", link)
+    print(f"[DEBUG] Deep candidate links from homepage: {len(urls)}")
 
     return list(urls)[:20]
 
@@ -690,7 +657,7 @@ def extract_video_sources(html, base_url):
             continue
 
     if sources:
-        print(f"[EXTRACTED] Found {len(sources)} video URLs: {sources}")
+        print(f"[EXTRACTED] Found {len(sources)} video URLs")
 
     return list(dict.fromkeys(sorted(sources)))
 
@@ -706,8 +673,10 @@ async def process_url_async(url, query_embed):
 
     print(f"[DEBUG] HTML length from {url}: {len(html)}")
     video_links = extract_video_sources(html, url)
-    if not video_links:
-        print(f"[DEBUG] Trying to expand from homepage: {url}")
+    if video_links:
+        print(f"[DEBUG] Extracted {len(video_links)} video links from {url}")
+    else:
+        print(f"[DEBUG] No direct video links, trying to expand from homepage: {url}")
         candidate_links = extract_deep_links(html, url)
         ranked_links = rank_deep_links(candidate_links, query_embed)
 
@@ -730,17 +699,15 @@ async def process_url_async(url, query_embed):
                 url = deep_url
                 video_links = deep_sources
                 break
-    else:
-        print(f"[DEBUG] Extracted {len(video_links)} video links from {url}")
 
     soup = BeautifulSoup(html, "lxml")
     video_elements = soup.find_all(["video", "source"])
     print(
         f"[DEBUG] HTML from {url} contains {len(video_elements)} <video>/<source> tags"
     )
-    print(f"[DEBUG] Found {len(video_links)} video sources at {url}: {video_links}")
+    print(f"[DEBUG] Found {len(video_links)} video sources at {url}")
     deep_links = rank_deep_links(extract_deep_links(html, url), query_embed)
-    print(f"[DEBUG] Deep links from {url}: {deep_links}")
+    print(f"[DEBUG] Deep links from {url}: {len(deep_links)}")
 
     for deep_url in deep_links[:5]:
         deep_html = await fetch_rendered_html_playwright(deep_url)
@@ -825,66 +792,119 @@ async def search_engine_async(query, link_count):
 
 
 async def advanced_search_async(query):
+    print(f"[DEBUG] Starting advanced_search_async for query: {query}")
+
     seen_hashes = set()
-    expanded_queries = expand_query_semantically(query)
+    expanded_queries = list(dict.fromkeys(expand_query_semantically(query)))
+    print(f"[DEBUG] Expanded queries: {expanded_queries}")
+
     query_embed = model_embed.encode(query)
     all_links, results, processed = [], [], set()
-    collected, sem = set(), asyncio.Semaphore(dynamic_parallel_task_limit())
+    collected = set()
+    sem = asyncio.Semaphore(dynamic_parallel_task_limit())
 
     async def worker(url):
         domain = get_main_domain(url)
+        print(f"[WORKER] Starting worker for: {url} (domain: {domain})")
         async with sem, domain_counters[domain]:
             try:
+                print(f"[WORKER] Calling process_url_async for: {url}")
                 result = await asyncio.wait_for(
-                    process_url_async(url, query_embed), timeout=30
+                    process_url_async(url, query_embed), timeout=60
                 )
+                print(f"[WORKER] process_url_async completed for: {url}")
+
                 if not result:
-                    print(f"[DEBUG] Failed to extract usable video from: {url}")
-                if result is None:
-                    print(f"[DEBUG] Skipping retry for: {url}")
-                    seen_hashes.add(url)
+                    print(f"[WORKER] No result for: {url}")
                     return None
-                if result and result.get("hash") not in seen_hashes:
-                    seen_hashes.add(result["hash"])
-                    return result
-                return None
+
+                if result.get("hash") in seen_hashes:
+                    print(f"[WORKER] Duplicate result hash for: {url}")
+                    return None
+
+                print(f"[WORKER] Valid result from: {url}, hash: {result.get('hash')}")
+                seen_hashes.add(result["hash"])
+                return result
+
             except asyncio.TimeoutError:
+                print(f"[WORKER TIMEOUT] {url}")
+                return None
+            except Exception as e:
+                print(f"[WORKER ERROR] {url}: {e}")
                 return None
 
     i, tasks = 0, []
-    max_time = 25
+    max_time = 90
     start_time = time.monotonic()
+
     while len(results) < SUMMARIES:
-        if time.monotonic() - start_time > max_time:
+        elapsed = time.monotonic() - start_time
+        print(
+            f"[LOOP] Results collected: {len(results)} | Time elapsed: {elapsed:.2f}s"
+        )
+
+        if elapsed > max_time:
+            print("[LOOP] Max time reached, exiting loop.")
             break
 
         if i >= len(all_links):
+            print("[LOOP] Fetching new links for expanded queries...")
             for q in expanded_queries:
-                links = await search_engine_async(
-                    q, LINKS_TO_SCRAP // len(expanded_queries)
-                )
-                print("[DEBUG] Links fetched:", links)
-                new_links = [u for u in links if u not in collected]
-                all_links += new_links
-                collected.update(new_links)
+                try:
+                    links = await search_engine_async(
+                        q, LINKS_TO_SCRAP // len(expanded_queries)
+                    )
+                    print(f"[LOOP] Links fetched for '{q}': {links}")
+                    new_links = [u for u in links if u not in collected]
+                    all_links += new_links
+                    collected.update(new_links)
+                except Exception as e:
+                    print(f"[LOOP ERROR] Failed to fetch links for query '{q}': {e}")
 
         while i < len(all_links) and len(tasks) < MAX_PARALLEL_TASKS:
             url = all_links[i]
             if url not in processed:
+                print(f"[TASK] Scheduling task for: {url}")
                 processed.add(url)
                 tasks.append(asyncio.create_task(worker(url)))
+            else:
+                print(f"[TASK] URL already processed: {url}")
             i += 1
 
         if not tasks:
+            print("[TASK] No active tasks, waiting...")
             await asyncio.sleep(0.1)
             continue
 
+        print(f"[TASK] Awaiting {len(tasks)} task(s)...")
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
         for d in done:
             tasks.remove(d)
-            if r := d.result():
-                results.append(r)
+            try:
+                result = d.result()
+                if result:
+                    print(f"[RESULT] Received result from task: {result.get('url')}")
+                    results.append(result)
+                else:
+                    print("[RESULT] Task returned None.")
+            except Exception as e:
+                print(f"[RESULT ERROR] Failed task: {e}")
 
+    if tasks:
+        print(f"[FINAL] Waiting on {len(tasks)} remaining tasks...")
+        done, _ = await asyncio.wait(tasks, timeout=15)
+        for d in done:
+            try:
+                result = d.result()
+                if result and result.get("hash") not in seen_hashes:
+                    print(f"[FINAL RESULT] {result.get('url')}")
+                    seen_hashes.add(result["hash"])
+                    results.append(result)
+            except Exception as e:
+                print(f"[FINAL RESULT ERROR] {e}")
+
+    print(f"[DONE] Returning {len(results)} result(s)")
     return results
 
 
@@ -929,20 +949,32 @@ async def search(query: str = "", power_scraping: bool = False):
         SUMMARIES = 5
 
     results = await advanced_search_async(query)
+    print(f"[RESULTS] Total results fetched: {len(results)}")
 
-    if not any(r.get("video_links", []) for r in results):
-        video_results = [r for r in results if r.get("video_links")]
-        print(f"[DEBUG] {len(video_results)} of {len(results)} had video_links")
-        results = video_results or results[:5]
+    video_results = [r for r in results if r.get("video_links")]
+    if video_results:
+        print(f"[RESULTS] {len(video_results)} result(s) contain video_links")
+        results = video_results
     else:
-        results = [r for r in results if r.get("video_links")]
+        print(
+            f"[RESULTS] No video_links found, falling back to top 5 summaries by score"
+        )
+        results = sorted(
+            results,
+            key=lambda x: (
+                x.get("score", 0),
+                -len(x["summary"]),
+                get_main_domain(x["url"]),
+            ),
+        )
 
     results = rank_by_similarity(results, query)
+    print(f"[RANKING] Results ranked by semantic similarity to query")
 
     return JSONResponse(
         content=[
             {
-                "title": r["title"] or r["url"],
+                "title": r["title"] or (r["summary"][:60] + "...") or r["url"],
                 "summary": r["summary"],
                 "video_links": r.get("video_links", []),
                 "tags": r.get("tags", []),
