@@ -353,57 +353,51 @@ def extract_keywords(text: str, top_n: int = 10, diversity=0.7):
 # === 🌐 RENDER + EXTRACT ===
 async def fetch_rendered_html_playwright(url, timeout=150000):
     browser = None
-    try:
-        os.makedirs("screenshots", exist_ok=True)
-        async with async_playwright() as p:
-            try:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-web-security",
-                    ],
-                )
-            except Exception as e:
-                print(f"[PLAYWRIGHT ERROR] Launch failed: {e}")
-                return ""
-
-            context = await browser.new_context(
-                user_agent=get_user_agent(),
-                viewport={"width": 1280, "height": 720},
-                java_script_enabled=True,
-                bypass_csp=True,
-                locale="en-US",
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-web-security",
+                ],
             )
+        except Exception as e:
+            print(f"[PLAYWRIGHT ERROR] Launch failed: {e}")
+            return ""
 
-            page = await context.new_page()
+        context = await browser.new_context(
+            user_agent=get_user_agent(),
+            viewport={"width": 1280, "height": 720},
+            java_script_enabled=True,
+            bypass_csp=True,
+            locale="en-US",
+        )
 
-            try:
-                await stealth_async(page)
-            except Exception as e:
-                print(f"[PLAYWRIGHT WARNING] Failed to apply stealth: {e}")
+        page = await context.new_page()
 
-            try:
-                await page.goto(url, timeout=timeout)
-                await page.wait_for_selector("video", timeout=10000)
-                await page.wait_for_load_state("networkidle")
-                await auto_bypass_consent_dialog(page)
-                html = await page.content()
-                return html
-            except Exception as e:
-                print(f"[PLAYWRIGHT ERROR] Failed to load {url}: {e}")
-                return ""
-    except Exception as e:
-        print(f"[PLAYWRIGHT FATAL] {url}: {e}")
-        return ""
-    finally:
-        if browser:
-            try:
-                await browser.close()
-            except:
-                print(f"[PLAYWRIGHT WARNING] Failed to close browser for {url}")
+        try:
+            await stealth_async(page)
+        except Exception as e:
+            print(f"[PLAYWRIGHT WARNING] Failed to apply stealth: {e}")
+
+        try:
+            await page.goto(url, timeout=timeout)
+            await page.wait_for_load_state("domcontentloaded")
+
+            for _ in range(3):
+                await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(800)
+
+            await auto_bypass_consent_dialog(page)
+
+            html = await page.content()
+            return html
+        except Exception as e:
+            print(f"[PLAYWRIGHT ERROR] Failed to load {url}: {e}")
+            return ""
 
 
 def preprocess_html(html):
@@ -558,6 +552,7 @@ def extract_video_sources(html, base_url):
     for script in soup.find_all("script"):
         if not isinstance(script, Tag) or not script.string:
             continue
+
         matches = re.findall(
             r'(https?://[^\s\'"]+\.(?:mp4|webm|m3u8|mov))', script.string
         )
@@ -586,6 +581,45 @@ def extract_video_sources(html, base_url):
                 group,
             )
             sources.update(nested_files)
+
+    meta_tags = [
+        ("property", "og:video"),
+        ("property", "og:video:url"),
+        ("property", "og:video:secure_url"),
+        ("name", "twitter:player"),
+        ("name", "twitter:player:stream"),
+    ]
+
+    for attr_name, attr_value in meta_tags:
+        tag = soup.find("meta", attrs={attr_name: attr_value})
+        if isinstance(tag, Tag):
+            content = tag.get("content")
+            if isinstance(content, str):
+                sources.add(urljoin(base_url, content))
+
+    for el in soup.find_all(["div", "span", "a", "button"]):
+        if not isinstance(el, Tag):
+            continue
+        for attr_name, attr_value in el.attrs.items():
+            if isinstance(attr_value, str) and "video" in attr_name.lower():
+                full_url = urljoin(base_url, attr_value)
+                if is_probable_video_url(full_url):
+                    sources.add(full_url)
+
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            if not isinstance(script, Tag) or not script.string:
+                continue
+            data = json.loads(script.string)
+            if isinstance(data, dict):
+                data = [data]
+            for item in data:
+                if isinstance(item, dict):
+                    video_url = item.get("contentUrl") or item.get("embedUrl")
+                    if video_url and is_probable_video_url(video_url):
+                        sources.add(urljoin(base_url, video_url))
+        except (json.JSONDecodeError, TypeError):
+            continue
 
     if sources:
         print(f"[EXTRACTED] Found {len(sources)} video URLs")
