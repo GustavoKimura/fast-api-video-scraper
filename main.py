@@ -1048,7 +1048,7 @@ def index():
 @app.get("/search")
 async def search(query: str = "", power_scraping: bool = False):
     print("=== STARTING SEARCH ===")
-    MINIMUM_VIDEOS_TO_RETURN = 5
+    MINIMUM_VIDEOS_TO_RETURN = 10
     videos_to_return = (
         min((os.cpu_count() or 4) * 10, 500)
         if power_scraping
