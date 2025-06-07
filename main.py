@@ -102,6 +102,11 @@ BAD_TAGS = [
     "optimize",
     "minor",
     "child",
+    "feedback",
+    "error",
+    "null",
+    "undefined",
+    "function",
 ]
 
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
@@ -462,7 +467,10 @@ def is_probable_video_url(url: str):
     video_exts = (".mp4", ".webm", ".m3u8", ".mov")
     parsed = urlparse(url)
     path = parsed.path.lower()
-    return any(path.endswith(ext) for ext in video_exts)
+    return (
+        any(path.endswith(ext) for ext in video_exts)
+        and not get_main_domain(url).lower() in BLOCKED_DOMAINS
+    )
 
 
 def extract_keywords(text: str, top_n: int = 10, diversity=0.7):
@@ -484,8 +492,15 @@ def is_sensible_keyword(kw):
         return False
     if re.search(r"[{}[\];<>$]", kw):
         return False
-    bad_kw = {"feedback", "error", "null", "undefined", "function"}
-    return kw.lower() not in bad_kw
+    if re.fullmatch(r"[a-z0-9]{8,}", kw):
+        return False
+    if sum(c.isdigit() for c in kw) > len(kw) * 0.4:
+        return False
+    if re.search(r"\b(ns|prod|widget|meta|error|stack)\b", kw.lower()):
+        return False
+    if len(re.findall(r"[a-zA-Z]", kw)) < len(kw) * 0.5:
+        return False
+    return kw.lower() not in BAD_TAGS
 
 
 def clean_tag_text(tag):
@@ -646,6 +661,9 @@ async def auto_bypass_consent_dialog(page):
             "button:has-text('OK')",
             "button:has-text('Got it')",
             "button:has-text('Agree')",
+            "text=I am 18+",
+            "text=Enter site",
+            "button:has-text('Enter site')",
         ]
         for selector in selectors:
             element = await page.query_selector(selector)
