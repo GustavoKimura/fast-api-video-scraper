@@ -380,15 +380,12 @@ async def auto_bypass_consent_dialog(page):
         ]
 
         for selector in selectors:
-            try:
-                element = await page.query_selector(selector)
-                if element:
-                    print(f"[CONSENT] Clicking selector: {selector}")
-                    await element.click(force=True)
-                    await page.wait_for_timeout(1000)
-                    break
-            except Exception as e:
-                print(f"[CONSENT WARNING] Could not click {selector}: {e}")
+            element = await page.query_selector(selector)
+            if element:
+                print(f"[CONSENT] Clicking selector: {selector}")
+                await element.click(force=True)
+                await page.wait_for_timeout(1000)
+                break
     except Exception as e:
         print(f"[CONSENT ERROR] {e}")
 
