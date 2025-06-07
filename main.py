@@ -657,7 +657,7 @@ async def fetch_rendered_html_playwright(
                         else await page.evaluate(script)
                     )
                 except Exception as e:
-                    logging.info(f"SAFE EVAL ERROR - {e}")
+                    logging.error(f"SAFE EVAL ERROR - {e}")
                     return None
 
             async def intercept_video_requests(route):
@@ -696,7 +696,7 @@ async def fetch_rendered_html_playwright(
                                 logging.debug(f"STREAM RESPONSE - Found stream: {url}")
                                 video_requests.append(url)
                     except Exception as e:
-                        logging.info(f"STREAM RESPONSE ERROR - {e}")
+                        logging.error(f"STREAM RESPONSE ERROR - {e}")
 
                 page.on(
                     "response",
@@ -767,17 +767,17 @@ async def fetch_rendered_html_playwright(
                     if context:
                         await context.unroute("**/*")
                 except Exception as e:
-                    logging.info(f"UNROUTE ERROR - {e}")
+                    logging.error(f"UNROUTE ERROR - {e}")
                 try:
                     if page and not page.is_closed():
                         await page.close()
                 except Exception as e:
-                    logging.info(f"PAGE CLOSE ERROR - {e}")
+                    logging.error(f"PAGE CLOSE ERROR - {e}")
                 try:
                     if context:
                         await context.close()
                 except Exception as e:
-                    logging.info(f"CONTEXT CLOSE ERROR - {e}")
+                    logging.error(f"CONTEXT CLOSE ERROR - {e}")
 
             return content, [
                 v for v in set(video_requests) if not v.startswith("blob:")
@@ -993,7 +993,7 @@ async def extract_video_sources(html, base_url, power_scraping):
                 )
                 sources.update(nested_sources)
             except Exception as e:
-                logging.info(f"IFRAME RECURSION ERROR - {iframe_url}: {e}")
+                logging.error(f"IFRAME RECURSION ERROR - {iframe_url}: {e}")
 
     for script in soup.find_all("script"):
         if not isinstance(script, Tag) or not script.string:
@@ -1154,7 +1154,7 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     try:
         text = content_extractor.get_content(html)
     except Exception as e:
-        logging.error(f"boilerpy3 failed: {e}")
+        logging.error(f"BOILERPY3 FAILED - {e}")
         text = ""
 
     if not text:
