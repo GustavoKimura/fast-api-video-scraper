@@ -1092,7 +1092,10 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
                 print(f"[RESULT ERROR] Failed task: {e}")
 
     if tasks:
-        done, _ = await asyncio.wait(tasks, timeout=15)
+        done, pending = await asyncio.wait(tasks, timeout=15)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
         for d in done:
             try:
                 result = d.result()
@@ -1139,15 +1142,21 @@ def index():
 async def search(query: str = "", power_scraping: bool = False):
     print("=== STARTING SEARCH ===")
     MINIMUM_VIDEOS_TO_RETURN = 10
+
     videos_to_return = (
         min((os.cpu_count() or 4) * 10, 500)
         if power_scraping
         else MINIMUM_VIDEOS_TO_RETURN
     )
-    results = await search_videos_async(
-        query,
-        videos_to_return,
-    )
+
+    try:
+        results = await asyncio.wait_for(
+            search_videos_async(query, videos_to_return), timeout=120
+        )
+    except asyncio.TimeoutError:
+        print(f"[TIMEOUT] Search query timed out: {query}")
+        results = []
+
     print(f"[RESULTS] Total results fetched: {len(results)}")
 
     video_results = [r for r in results if r.get("videos")]
