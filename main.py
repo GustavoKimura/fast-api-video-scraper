@@ -33,7 +33,20 @@ def get_domain_concurrency():
     return base
 
 
+def get_ffprobe_concurrency():
+    cores = os.cpu_count() or 4
+    ram_gb = psutil.virtual_memory().total // 1_073_741_824
+
+    base = min(cores // 2, 8)
+    if ram_gb >= 16:
+        base += 2
+    elif ram_gb <= 4:
+        base = max(1, base - 1)
+    return max(2, base)
+
+
 domain_counters = defaultdict(lambda: asyncio.Semaphore(get_domain_concurrency()))
+ffprobe_sem = asyncio.Semaphore(get_ffprobe_concurrency())
 
 
 # === ⚙️ CONFIGURATION ===
@@ -140,9 +153,11 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=1800):
     final = []
 
     for r in results:
-        if not r.get("duration"):
+        try:
+            dur_secs = float(r.get("duration", 0))
+        except (ValueError, TypeError):
             continue
-        dur_secs = duration_to_seconds(r["duration"])
+
         if not (min_duration <= dur_secs <= max_duration):
             continue
 
@@ -253,6 +268,32 @@ def duration_to_seconds(duration_str: str):
         return hours * 3600 + minutes * 60 + seconds
     except ValueError:
         return 0
+
+
+async def get_video_duration(url: str):
+    async with ffprobe_sem:
+        try:
+            cmd = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                url,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+            duration_str = stdout.decode().strip()
+            return float(duration_str) if duration_str else 0.0
+        except Exception as e:
+            print(f"[FFPROBE ERROR] {url}: {e}")
+            return 0.0
 
 
 def extract_tags(text: str, top_n: int = 10):
@@ -580,7 +621,6 @@ async def extract_video_metadata(url, query_embed):
                 video_links = deep_sources
                 break
 
-    soup = BeautifulSoup(html, "lxml")
     deep_links = rank_deep_links(extract_video_candidate_links(html, url), query_embed)
 
     for deep_url in deep_links[:5]:
@@ -627,12 +667,23 @@ async def extract_video_metadata(url, query_embed):
 
     meta = await extract_metadata(html)
     tags = auto_generate_tags_from_text(f"{text.strip()} {meta['title']}", top_k=10)
+    duration = 0.0
+
+    for video_url in video_links:
+        duration = await get_video_duration(video_url)
+        if duration >= 1:
+            break
+
+    if duration == 0.0:
+        print(f"[DURATION WARNING] No valid duration found for {url}")
+
     return {
         "url": url,
         "video_links": video_links,
         "title": meta["title"] or urlparse(url).netloc,
         "description": meta["description"],
         "tags": tags,
+        "duration": str(int(duration)),
         "score": 0.0,
     }
 
@@ -807,7 +858,8 @@ async def search(query: str = "", power_scraping: bool = False):
                 "description": r["description"],
                 "video_links": r["video_links"],
                 "tags": r["tags"],
-                "video_score": r["score"],
+                "duration": r["duration"],
+                "score": r["score"],
             }
             for r in results
         ]
