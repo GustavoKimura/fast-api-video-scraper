@@ -7,6 +7,7 @@
       defer
       src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"
     ></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
       /* Reset & Base */
@@ -214,12 +215,24 @@
             >
               <div style="margin-bottom: 1rem">
                 <video
-                  :src="video.url"
+                  :x-ref="'player' + vidx"
+                  :id="'video-' + vidx"
                   controls
                   preload="metadata"
                   playsinline
                   muted
+                  x-init="
+                    const ref = $refs['player' + vidx];
+                    if (video.is_stream && Hls.isSupported()) {
+                      const hls = new Hls();
+                      hls.loadSource(video.url);
+                      hls.attachMedia(ref);
+                    } else {
+                      ref.src = video.url;
+                    }
+                  "
                 ></video>
+
                 <h3 x-text="video.title || item.title"></h3>
                 <p>
                   <strong
@@ -246,6 +259,20 @@
                       "
                       x-text="tag"
                     ></span>
+                  </template>
+
+                  <template x-if="video.is_stream">
+                    <span
+                      style="
+                        display: inline-block;
+                        background: #332200;
+                        padding: 4px 8px;
+                        border-radius: 12px;
+                        font-size: 0.75rem;
+                        color: #ffcc66;
+                      "
+                      >🔄 Stream</span
+                    >
                   </template>
                 </div>
               </div>

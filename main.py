@@ -561,8 +561,12 @@ async def deduplicate_videos(videos: list[dict]) -> list[dict]:
 # === 🌐 RENDER + EXTRACT ===
 async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
     async def _internal_fetch_with_playwright(url, timeout):
+        html = ""
         browser = None
+        context = None
+        page = None
         video_requests = []
+        blob_urls = []
 
         async def intercept_video_requests(route):
             try:
@@ -626,7 +630,19 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                     print(f"[PLAYWRIGHT WARNING] Stealth failed: {e}")
 
                 try:
-                    await page.goto(url, timeout=timeout)
+                    try:
+                        await page.goto(url, timeout=timeout)
+                    except Exception as e:
+                        print(f"[NAVIGATION ERROR] {url}: {e}")
+                        try:
+                            html = (
+                                await page.content()
+                                if page and not page.is_closed()
+                                else ""
+                            )
+                        except:
+                            html = ""
+                        return html
                     await page.evaluate(
                         """window.alert = () => {}; window.confirm = () => true;"""
                     )
@@ -713,6 +729,9 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                                     """
                                 )
                                 if blob_url:
+                                    if not blob_url.startswith("blob:"):
+                                        blob_url = f"blob:{blob_url}"
+                                    video_requests.append(blob_url)
                                     print(
                                         f"[BLOB URL DETECTED] {blob_url} (not downloadable)"
                                     )
@@ -756,33 +775,35 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
 
             finally:
                 try:
-                    html = await page.content()
+                    if page and not page.is_closed():
+                        html = await page.content()
                 except Exception as e:
                     print(f"[CONTENT ERROR] Failed to fetch page content: {e}")
+                    html = ""
 
                 try:
-                    if page in context.pages:
+                    if context and page in context.pages:
                         await page.unroute_all(behavior="ignoreErrors")
                 except Exception as e:
                     print(f"[UNROUTE CLEANUP ERROR] {e}")
 
                 try:
-                    if "context" in locals():
+                    if context:
                         await context.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[CONTEXT CLOSE ERROR] {e}")
                 try:
                     if browser:
                         await browser.close()
-                except Exception:
-                    pass
-                return html
+                except Exception as e:
+                    print(f"[BROWSER CLOSE ERROR] {e}")
+                return html, list(set(video_requests))
 
     for attempt in range(retries + 1):
         try:
-            html = await _internal_fetch_with_playwright(url, timeout)
+            html, video_urls = await _internal_fetch_with_playwright(url, timeout)
             if html and html.strip():
-                return html
+                return html, video_urls
         except Exception as e:
             print(f"[RETRY {attempt}] Playwright failed: {e}")
         await asyncio.sleep(2 * (attempt + 1))
@@ -969,7 +990,7 @@ async def extract_video_sources(html, base_url):
         if src and ("player" in src or "embed" in src):
             iframe_url = urljoin(base_url, str(src))
             try:
-                iframe_html = await fetch_rendered_html_playwright(iframe_url)
+                iframe_html, _ = await fetch_rendered_html_playwright(iframe_url)
                 nested_sources = await extract_video_sources(iframe_html, iframe_url)
                 sources.update(nested_sources)
             except Exception as e:
@@ -1049,7 +1070,7 @@ async def extract_video_metadata(url, query_embed):
     if not is_valid_link(url):
         return None
 
-    html = await fetch_rendered_html_playwright(url)
+    html, raw_video_urls = await fetch_rendered_html_playwright(url)
     if not html.strip():
         print(f"[ERROR] No HTML content fetched from {url}")
         return None
@@ -1065,7 +1086,7 @@ async def extract_video_metadata(url, query_embed):
 
     if not video_links:
         for deep_url in rank_deep_links(candidate_links, query_embed)[:3]:
-            deep_html = await fetch_rendered_html_playwright(deep_url)
+            deep_html, _ = await fetch_rendered_html_playwright(deep_url)
             if (
                 "404" in deep_html
                 or "Page not found" in deep_html
@@ -1137,6 +1158,13 @@ async def extract_video_metadata(url, query_embed):
         if duration == 0.0:
             print(f"[DURATION WARNING] No valid duration found for {url}")
 
+        is_stream = False
+        if video_url.startswith("blob:") or "m3u8" in video_url:
+            print(f"[INFO] Stream detected (blob/m3u8): {video_url}")
+            is_stream = True
+            if duration == 0.0:
+                duration = 60.0
+
         if duration == 0:
             print(f"[WARNING] Accepting video with unknown duration: {video_url}")
 
@@ -1162,6 +1190,7 @@ async def extract_video_metadata(url, query_embed):
                 "tags": tags,
                 "duration": f"{duration:.2f}",
                 "score": 0.0,
+                "is_stream": is_stream,
             }
         )
 
@@ -1439,14 +1468,14 @@ async def search(query: str = "", power_scraping: bool = False):
                 "description": r["description"],
                 "videos": [
                     {
-                        **{k: v for k, v in video.items() if k != "score"},
+                        **{k: v for k, v in video.items() if k not in {"score"}},
                         "duration": (
                             video["duration"]
                             if float(video.get("duration", 0)) > 0
                             else "unknown"
                         ),
+                        "is_stream": video.get("is_stream", False),
                     }
-                    for video in r["videos"]
                 ],
             }
             for r in results
