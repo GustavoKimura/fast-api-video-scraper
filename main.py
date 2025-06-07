@@ -1,5 +1,5 @@
 # === 📦 IMPORTS ===
-import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json, base64
+import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json, base64, concurrent.futures, subprocess
 from urllib.parse import urlparse, urlunparse, urljoin
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -19,6 +19,7 @@ from typing import List, Tuple
 from itertools import combinations
 from difflib import SequenceMatcher
 from playwright_stealth import stealth_async
+from functools import lru_cache
 
 
 # === 🔒 DOMAIN CONCURRENCY CONTROL ===
@@ -45,8 +46,26 @@ def get_ffprobe_concurrency():
     return max(2, base)
 
 
+async def run_ffprobe(cmd):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        executor, lambda: subprocess.check_output(cmd).decode().strip()
+    )
+
+
+async def run_ffprobe_json(cmd):
+    loop = asyncio.get_running_loop()
+
+    def run():
+        result = subprocess.check_output(cmd).decode().strip()
+        return json.loads(result)
+
+    return await loop.run_in_executor(executor, run)
+
+
 domain_counters = defaultdict(lambda: asyncio.Semaphore(get_domain_concurrency()))
 ffprobe_sem = asyncio.Semaphore(get_ffprobe_concurrency())
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=(os.cpu_count() or 4) * 2)
 
 
 # === ⚙️ CONFIGURATION ===
@@ -62,6 +81,7 @@ DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 content_extractor = extractors.LargestContentExtractor()
 SEARXNG_BASE_URL = "http://searxng:8080/search"
+
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -124,7 +144,8 @@ class OpenCLIPEmbedder:
         self.model = self.model.to(self.device)
         self.tokenizer = open_clip.get_tokenizer(model_name)
 
-    def encode(self, text: str):
+    @lru_cache(maxsize=1024)
+    def encode_cached(self, text: str):
         tokens = self.tokenizer(text).to(self.device)
         with torch.no_grad():
             features = self.model.encode_text(tokens).float()
@@ -137,12 +158,12 @@ kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
 
 def expand_query_semantically(query: str, top_n: int = 5):
     raw_keywords = extract_keywords(query, diversity=0.8, top_n=top_n * 2)
-    query_vec = model_embed.encode(query)
+    query_vec = model_embed.encode_cached(query)
     filtered = []
 
     for kw, _ in raw_keywords:
         kw = str(kw).strip()
-        kw_vec = model_embed.encode(kw)
+        kw_vec = model_embed.encode_cached(kw)
         sim = cosine_sim(query_vec, kw_vec)
 
         if not any(
@@ -165,7 +186,7 @@ def cosine_sim(a, b):
 
 
 def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
-    query_embed = model_embed.encode(query)
+    query_embed = model_embed.encode_cached(query)
 
     raw_tags = extract_tags(query)
     query_tags = {kw for kw, _ in raw_tags if isinstance(kw, str)}
@@ -194,7 +215,7 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
 
         if r.get("tags"):
             tag_text = " ".join(r["tags"])
-            tag_embed = model_embed.encode(tag_text)
+            tag_embed = model_embed.encode_cached(tag_text)
             sim = cosine_sim(query_embed, tag_embed)
             result_tags = normalize_tags(r.get("tags", []))
             query_tags_norm = normalize_tags(list(query_tags))
@@ -209,7 +230,7 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             seen_domains.add(domain)
 
         if score == 0.0 and r.get("title"):
-            title_embed = model_embed.encode(r["title"])
+            title_embed = model_embed.encode_cached(r["title"])
             score = cosine_sim(query_embed, title_embed) * 0.6
 
         r["score"] = score - score_penalty
@@ -230,7 +251,7 @@ def rank_deep_links(links, query_embed):
     scored = []
     for link in links:
         snippet = re.sub(r"[-_/]", " ", link.split("/")[-1])
-        embed = model_embed.encode(snippet)
+        embed = model_embed.encode_cached(snippet)
         sim = cosine_sim(query_embed, embed)
         scored.append((sim, link))
     scored.sort(reverse=True)
@@ -328,11 +349,7 @@ async def get_video_duration(url: str, html: str = "") -> float:
                 "default=noprint_wrappers=1:nokey=1",
                 url,
             ]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            stdout, _ = await proc.communicate()
-            duration_str = stdout.decode().strip()
+            duration_str = await run_ffprobe(cmd)
             if duration_str:
                 duration = float(duration_str)
                 if duration > 0:
@@ -377,14 +394,7 @@ async def get_video_resolution_score(url: str) -> int:
                 "json",
                 url,
             ]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            data = json.loads(stdout.decode())
-
+            data = await run_ffprobe_json(cmd)
             if "streams" in data and data["streams"]:
                 stream = data["streams"][0]
                 width = stream.get("width", 0)
@@ -479,7 +489,7 @@ def extract_keywords(text: str, top_n: int = 10, diversity=0.7):
         keyphrase_ngram_range=(1, 3),
         use_mmr=True,
         diversity=diversity,
-        top_n=top_n,
+        top_n=min(top_n, 5),
     )
 
 
@@ -561,54 +571,54 @@ async def fetch_rendered_html_playwright(
     if power_scraping:
         timeout = 900000
 
-    async def _internal_fetch_with_playwright(url, timeout):
-        html = ""
-        browser = None
-        context = None
-        page = None
-        video_requests = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-web-security",
+            ],
+        )
 
-        async def safe_evaluate(page, script, arg=None):
-            try:
-                if page.is_closed():
+        async def _internal_fetch_with_playwright(url, timeout, browser):
+            html = ""
+            context = None
+            page = None
+            video_requests = []
+
+            async def safe_evaluate(page, script, arg=None):
+                try:
+                    if page.is_closed():
+                        return None
+                    return (
+                        await page.evaluate(script, arg)
+                        if arg
+                        else await page.evaluate(script)
+                    )
+                except Exception as e:
+                    print(f"[SAFE EVAL ERROR] {e}")
                     return None
-                return (
-                    await page.evaluate(script, arg)
-                    if arg
-                    else await page.evaluate(script)
-                )
-            except Exception as e:
-                print(f"[SAFE EVAL ERROR] {e}")
-                return None
 
-        async def intercept_video_requests(route):
-            try:
-                req_url = route.request.url
-                if any(
-                    ext in req_url.lower()
-                    for ext in [".mp4", ".webm", ".m3u8", ".ts", ".mov"]
-                ):
-                    if req_url not in video_requests:
-                        print(f"[INTERCEPT] Video URL: {req_url}")
-                        video_requests.append(req_url)
-                await route.continue_()
-            except Exception as e:
-                if "Target page, context or browser has been closed" in str(e):
-                    print("[ROUTE WARNING] Route skipped after page closed.")
-                else:
-                    print(f"[ROUTE ERROR] {e}")
+            async def intercept_video_requests(route):
+                try:
+                    req_url = route.request.url
+                    if any(
+                        ext in req_url.lower()
+                        for ext in [".mp4", ".webm", ".m3u8", ".ts", ".mov"]
+                    ):
+                        if req_url not in video_requests:
+                            print(f"[INTERCEPT] Video URL: {req_url}")
+                            video_requests.append(req_url)
+                    await route.continue_()
+                except Exception as e:
+                    if "Target page, context or browser has been closed" in str(e):
+                        print("[ROUTE WARNING] Route skipped after page closed.")
+                    else:
+                        print(f"[ROUTE ERROR] {e}")
 
-        async with async_playwright() as p:
             try:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-web-security",
-                    ],
-                )
                 context = await browser.new_context(
                     user_agent=get_user_agent(),
                     viewport={"width": 1280, "height": 720},
@@ -619,12 +629,12 @@ async def fetch_rendered_html_playwright(
                 await context.route("**/*", intercept_video_requests)
                 page = await context.new_page()
 
-                async def handle_stream_response(response, video_requests):
+                async def handle_stream_response(response):
                     try:
                         url = response.url.lower()
                         if any(ext in url for ext in [".m3u8", ".ts", ".mpd"]):
                             if url not in video_requests:
-                                print(f"[STREAM RESPONSE] Found video stream: {url}")
+                                print(f"[STREAM RESPONSE] Found stream: {url}")
                                 video_requests.append(url)
                     except Exception as e:
                         print(f"[STREAM RESPONSE ERROR] {e}")
@@ -632,7 +642,7 @@ async def fetch_rendered_html_playwright(
                 page.on(
                     "response",
                     lambda response: asyncio.create_task(
-                        handle_stream_response(response, video_requests)
+                        handle_stream_response(response)
                     ),
                 )
                 page.set_default_navigation_timeout(timeout)
@@ -640,23 +650,10 @@ async def fetch_rendered_html_playwright(
                 try:
                     await stealth_async(page)
                 except Exception as e:
-                    print(f"[PLAYWRIGHT WARNING] Stealth failed: {e}")
+                    print(f"[STEALTH ERROR] {e}")
 
                 try:
-                    try:
-                        if not page.is_closed():
-                            await page.goto(url, timeout=timeout)
-                    except Exception as e:
-                        print(f"[NAVIGATION ERROR] {url}: {e}")
-                        try:
-                            html = (
-                                await page.content()
-                                if page and not page.is_closed()
-                                else ""
-                            )
-                        except:
-                            html = ""
-                        return html
+                    await page.goto(url, timeout=timeout)
                     await safe_evaluate(
                         page,
                         """window.alert = () => {}; window.confirm = () => true;""",
@@ -664,104 +661,21 @@ async def fetch_rendered_html_playwright(
                     await page.wait_for_load_state("domcontentloaded", timeout=timeout)
                 except Exception as e:
                     print(f"[NAVIGATION ERROR] {url}: {e}")
-                    return ""
+                    return "", []
 
                 try:
                     await page.locator("video source").first.wait_for(timeout=8000)
                 except:
-                    print("[INFO] No <source> tag found directly.")
+                    print("[INFO] No <source> tag found.")
 
-                try:
-                    video_src = await safe_evaluate(
-                        page,
-                        """() => {
-                        try {
-                            const sources = document.querySelectorAll("video source[src]");
-                            if (sources.length > 0) return sources[0].src;
-
-                            const scripts = Array.from(document.scripts).map(s => s.textContent).join("\\n");
-                            const match = scripts.match(/"file"\\s*:\\s*"([^"]+\\.(mp4|webm|m3u8))"/i);
-                            return match ? match[1] : null;
-                        } catch (e) {
-                            return null;
-                        }
-                    }""",
-                    )
-                    if video_src:
-                        await safe_evaluate(
-                            page,
-                            """(videoSrc) => {
-                            try {
-                                const v = document.createElement('video');
-                                const s = document.createElement('source');
-                                s.src = videoSrc;
-                                v.appendChild(s);
-                                document.body.appendChild(v);
-                            } catch (e) {
-                                console.error(e);
-                            }
-                        }""",
-                            video_src,
-                        )
-                        print(f"[JS VIDEO SRC] Injected src: {video_src}")
-                except Exception as e:
-                    print(f"[VIDEO JS ERROR] {e}")
-
-                try:
-                    await safe_evaluate(
-                        page,
-                        """() => {
-                        document.querySelectorAll('button, .play, .video-play, .btn-play, .vjs-big-play-button, .player-button')
+                await safe_evaluate(
+                    page,
+                    """() => {
+                        document.querySelectorAll('button, .play, .btn-play, .vjs-big-play-button')
                         .forEach(el => { try { el.click(); } catch (e) {} });
                     }""",
-                    )
-                    await page.wait_for_timeout(1500)
-
-                    try:
-                        video_url = await safe_evaluate(
-                            page,
-                            """
-                        () => {
-                            const vid = document.querySelector("video");
-                            if (vid) {
-                                return vid.currentSrc || vid.src || (vid.querySelector("source")?.src) || null;
-                            }
-                            return null;
-                        }
-                        """,
-                        )
-                        try:
-                            uses_mse = await safe_evaluate(
-                                page,
-                                "() => !!(window.MediaSource && typeof window.MediaSource === 'function')",
-                            )
-                            if uses_mse:
-                                print("[MEDIA SOURCE] Detected use of MediaSource API")
-                                blob_url = await safe_evaluate(
-                                    page,
-                                    """
-                                    () => {
-                                        const vids = document.querySelectorAll("video");
-                                        for (const vid of vids) {
-                                            if (vid.src.startsWith("blob:")) return vid.src;
-                                        }
-                                        return null;
-                                    }
-                                    """,
-                                )
-                                if blob_url:
-                                    print(
-                                        f"[BLOB URL DETECTED] {blob_url} — skipping, not downloadable"
-                                    )
-                        except Exception as e:
-                            print(f"[MEDIA SOURCE CHECK ERROR] {e}")
-                        if video_url and video_url not in video_requests:
-                            print(f"[VIDEO FOUND] JS-evaluated video URL: {video_url}")
-                            video_requests.append(video_url)
-                    except Exception as e:
-                        print(f"[VIDEO EVALUATE ERROR] {e}")
-                except Exception as e:
-                    print(f"[CLICK SIMULATION ERROR] {e}")
+                )
+                await page.wait_for_timeout(1500)
 
                 last_height = await safe_evaluate(page, "document.body.scrollHeight")
                 for _ in range(5):
@@ -776,48 +690,46 @@ async def fetch_rendered_html_playwright(
 
                 await auto_bypass_consent_dialog(page)
 
-            finally:
-                try:
-                    if page and not page.is_closed():
-                        html = await page.content()
-                except Exception as e:
-                    print(f"[CONTENT ERROR] Failed to fetch page content: {e}")
-                    html = ""
+                content = extract_content(html)
+                del html
 
+            finally:
                 try:
                     if context:
                         await context.unroute("**/*")
                 except Exception as e:
-                    print(f"[UNROUTE CLEANUP ERROR] {e}")
-
+                    print(f"[UNROUTE ERROR] {e}")
                 try:
                     if page and not page.is_closed():
                         await page.close()
-                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    print(f"[PAGE CLOSE ERROR] {e}")
+                try:
                     if context:
                         await context.close()
                 except Exception as e:
                     print(f"[CONTEXT CLOSE ERROR] {e}")
-                try:
-                    if browser:
-                        await browser.close()
-                except Exception as e:
-                    print(f"[BROWSER CLOSE ERROR] {e}")
 
-                return html, [
-                    v for v in set(video_requests) if not v.startswith("blob:")
-                ]
+            return content, [
+                v for v in set(video_requests) if not v.startswith("blob:")
+            ]
 
-    for attempt in range(retries + 1):
+        for attempt in range(retries + 1):
+            try:
+                html, video_urls = await _internal_fetch_with_playwright(
+                    url, timeout, browser
+                )
+                if html and html.strip():
+                    return html, video_urls
+            except Exception as e:
+                print(f"[RETRY {attempt}] Error fetching {url}: {e}")
+            await asyncio.sleep(2 * (attempt + 1))
+
         try:
-            html, video_urls = await _internal_fetch_with_playwright(url, timeout)
-            if html and html.strip():
-                return html, video_urls
+            await browser.close()
         except Exception as e:
-            print(
-                f"[RETRY {attempt}] Playwright failed on URL: {url} — {type(e).__name__}: {e}"
-            )
-        await asyncio.sleep(2 * (attempt + 1))
+            print(f"[BROWSER CLOSE ERROR] {e}")
+
     return "", []
 
 
@@ -1095,7 +1007,7 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     if not is_valid_link(url):
         return None
 
-    html, raw_video_urls = await fetch_rendered_html_playwright(url)
+    html, _ = await fetch_rendered_html_playwright(url)
     if not html.strip():
         print(f"[ERROR] No HTML content fetched from {url}")
         return None
@@ -1169,6 +1081,10 @@ async def extract_video_metadata(url, query_embed, power_scraping):
         print(f"[ERROR] boilerpy3 failed: {e}")
         text = ""
 
+    if not text:
+        soup = BeautifulSoup(html, "lxml")
+        text = soup.get_text(separator="\n").strip()
+
     if len(text) < 200:
         try:
             doc = Document(html)
@@ -1197,7 +1113,10 @@ async def extract_video_metadata(url, query_embed, power_scraping):
         if video_url in seen_video_urls:
             continue
         seen_video_urls.add(video_url)
-        duration = await asyncio.wait_for(get_video_duration(url), timeout=10)
+        duration = await asyncio.wait_for(
+            get_video_duration(url, query_embed),
+            timeout=60 if power_scraping else 30,
+        )
         if duration == 0.0:
             print(f"[DURATION WARNING] No valid duration found for {url}")
 
@@ -1311,7 +1230,7 @@ async def search_videos_async(
         expanded_queries = [query]
     print(f"[DEBUG] Expanded queries: {expanded_queries}")
 
-    query_embed = model_embed.encode(query)
+    query_embed = model_embed.encode_cached(query)
     all_links, results, processed, seen_video_urls = [], [], set(), set()
     collected = set()
     sem = asyncio.Semaphore(min(MAX_PARALLEL_TASKS, 8))
@@ -1324,7 +1243,7 @@ async def search_videos_async(
                 try:
                     result = await asyncio.wait_for(
                         extract_video_metadata(url, query_embed, power_scraping),
-                        timeout=60,
+                        timeout=30 if not power_scraping else 60,
                     )
                 except asyncio.TimeoutError:
                     print(f"[RETRY] Timeout, retrying with reduced timeout: {url}")
@@ -1341,7 +1260,7 @@ async def search_videos_async(
                 print(f"[WORKER ERROR] {url}: {e.__class__.__name__} - {e}")
             return url, None
 
-    i, tasks, pending = 0, [], set()
+    i, tasks = 0, []
     max_time = 360
     start_time = time.monotonic()
 
@@ -1373,7 +1292,7 @@ async def search_videos_async(
                 except Exception as e:
                     print(f"[LINK ERROR] {q}: {e}")
 
-        while i < len(all_links) and (len(tasks) + len(pending)) < MAX_PARALLEL_TASKS:
+        while i < len(all_links) and len(tasks) < MAX_PARALLEL_TASKS:
             url = all_links[i]
             if url not in processed:
                 tasks.append(asyncio.create_task(worker(url)))
@@ -1383,48 +1302,47 @@ async def search_videos_async(
             await asyncio.sleep(0.2)
             continue
 
-        done, still_pending = await asyncio.wait(
-            tasks, return_when=asyncio.FIRST_COMPLETED
-        )
-        tasks = [t for t in tasks if not t in done]
+        results_raw = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks.clear()
 
-        for task in done:
-            try:
-                url, result = await task
-                if url:
-                    processed.add(url)
+        for result in results_raw:
+            if isinstance(result, BaseException):
+                print(f"[TASK ERROR] {type(result).__name__}: {result}")
+                continue
 
-                if result:
-                    new_videos = []
-                    for video in result.get("videos", []):
-                        norm_url = normalize_url(video["url"])
-                        if norm_url not in seen_video_urls:
-                            seen_video_urls.add(norm_url)
-                            new_videos.append(video)
+            if not isinstance(result, (tuple, list)) or len(result) != 2:
+                print(f"[TASK FORMAT ERROR] Unexpected result: {result}")
+                continue
 
-                    if new_videos:
-                        remaining = max_videos - video_count
-                        accepted = new_videos[:remaining]
-                        result["videos"] = accepted
-                        results.append(result)
-                        video_count += len(accepted)
-                        print(
-                            f"[RESULT] {len(accepted)} accepted from {url} — total: {video_count}/{max_videos}"
-                        )
+            url, data = result
+            if url:
+                processed.add(url)
+            if not data:
+                continue
 
-                        if video_count >= max_videos:
-                            print("[SUCCESS] Target reached.")
-                            break
-            except Exception as e:
-                print(f"[TASK ERROR] {e}")
+            new_videos = []
+            for video in data.get("videos", []):
+                norm_url = normalize_url(video["url"])
+                if norm_url not in seen_video_urls:
+                    seen_video_urls.add(norm_url)
+                    new_videos.append(video)
+
+            if new_videos:
+                remaining = max_videos - video_count
+                accepted = new_videos[:remaining]
+                data["videos"] = accepted
+                results.append(data)
+                video_count += len(accepted)
+                print(
+                    f"[RESULT] {len(accepted)} accepted from {url} — total: {video_count}/{max_videos}"
+                )
+
+                if video_count >= max_videos:
+                    print("[SUCCESS] Target reached.")
+                    break
+
         if video_count >= max_videos:
             break
-
-    for task in tasks:
-        if not task.done():
-            task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-    tasks.clear()
 
     all_videos = []
     for result in results:
@@ -1436,7 +1354,7 @@ async def search_videos_async(
     ranked = rank_by_similarity(all_videos, query)
     if not any(v.get("score", 0.0) > 0.0 for v in ranked):
         ranked.sort(key=lambda v: float(v.get("duration", 0)), reverse=True)
-    ranked = (ranked or [])[:max_videos]
+    ranked = ranked[:max_videos]
 
     if len(ranked) < max_videos:
         print(
