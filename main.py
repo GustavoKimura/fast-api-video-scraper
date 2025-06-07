@@ -435,7 +435,6 @@ async def fetch_rendered_html_playwright(url, timeout=90000):
                 await page.wait_for_load_state("networkidle")
                 await auto_bypass_consent_dialog(page)
                 html = await page.content()
-                print(f"[PLAYWRIGHT] HTML content fetched from {url} (len={len(html)})")
 
                 return html
 
@@ -671,7 +670,6 @@ async def process_url_async(url, query_embed):
         print(f"[ERROR] No HTML content fetched from {url}")
         return None
 
-    print(f"[DEBUG] HTML length from {url}: {len(html)}")
     video_links = extract_video_sources(html, url)
     if video_links:
         print(f"[DEBUG] Extracted {len(video_links)} video links from {url}")
@@ -756,7 +754,6 @@ async def process_url_async(url, query_embed):
     text_hash = hashlib.md5(text.encode()).hexdigest()
     meta = await extract_metadata(html)
     tags = auto_generate_tags_from_text(f"{text.strip()} {meta['title']}", top_k=10)
-    print(f"[DEBUG] HTML from {url} contains {len(tags)} <video>/<source> tags")
     result = {
         "url": url,
         "summary": text.strip(),
@@ -792,8 +789,6 @@ async def search_engine_async(query, link_count):
 
 
 async def advanced_search_async(query):
-    print(f"[DEBUG] Starting advanced_search_async for query: {query}")
-
     seen_hashes = set()
     expanded_queries = list(dict.fromkeys(expand_query_semantically(query)))
     print(f"[DEBUG] Expanded queries: {expanded_queries}")
@@ -839,9 +834,8 @@ async def advanced_search_async(query):
 
     while len(results) < SUMMARIES:
         elapsed = time.monotonic() - start_time
-        print(
-            f"[LOOP] Results collected: {len(results)} | Time elapsed: {elapsed:.2f}s"
-        )
+        if int(elapsed) % 10 == 0:
+            print(f"[LOOP] {len(results)} results so far after {int(elapsed)}s")
 
         if elapsed > max_time:
             print("[LOOP] Max time reached, exiting loop.")
@@ -854,7 +848,6 @@ async def advanced_search_async(query):
                     links = await search_engine_async(
                         q, LINKS_TO_SCRAP // len(expanded_queries)
                     )
-                    print(f"[LOOP] Links fetched for '{q}': {links}")
                     new_links = [u for u in links if u not in collected]
                     all_links += new_links
                     collected.update(new_links)
@@ -864,7 +857,6 @@ async def advanced_search_async(query):
         while i < len(all_links) and len(tasks) < MAX_PARALLEL_TASKS:
             url = all_links[i]
             if url not in processed:
-                print(f"[TASK] Scheduling task for: {url}")
                 processed.add(url)
                 tasks.append(asyncio.create_task(worker(url)))
             else:
@@ -904,7 +896,6 @@ async def advanced_search_async(query):
             except Exception as e:
                 print(f"[FINAL RESULT ERROR] {e}")
 
-    print(f"[DONE] Returning {len(results)} result(s)")
     return results
 
 
