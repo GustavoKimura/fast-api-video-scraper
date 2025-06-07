@@ -368,6 +368,16 @@ async def fetch_rendered_html_playwright(url, timeout=60000):
                 pass
 
             await page.goto(url, timeout=timeout)
+            try:
+                link = await page.query_selector("a[href*='view_video']")
+                if link:
+                    print("[DEBUG] Clicking into video subpage...")
+                    await link.click()
+                    await page.wait_for_load_state("networkidle")
+                    await page.wait_for_timeout(3000)
+            except Exception as e:
+                print(f"[WARNING] Failed to click into video subpage: {e}")
+
             await page.wait_for_load_state("networkidle")
 
             for _ in range(5):
@@ -393,6 +403,11 @@ async def fetch_rendered_html_playwright(url, timeout=60000):
             await page.wait_for_timeout(2000)
             await page.mouse.click(640, 360)
             await page.wait_for_timeout(5000)
+
+            anchors = await page.query_selector_all("a")
+            for a in anchors[:20]:
+                href = await a.get_attribute("href")
+                print("[ANCHOR]", href)
 
             html = await page.content()
 
@@ -516,10 +531,10 @@ def extract_deep_links(html: str, base_url: str) -> list[str]:
             continue
 
         if (
-            "/view" in full_url
-            or "/video" in full_url
-            or "viewkey=" in full_url
-            or re.search(r"/(watch|embed|v)/", full_url)
+            "viewkey=" in full_url
+            or re.search(r"/video\d+", full_url)
+            or re.search(r"/view_video\.php\?viewkey=", full_url)
+            or re.search(r"/watch/\d+", full_url)
         ):
             urls.add(full_url)
 
@@ -548,10 +563,13 @@ def extract_video_sources(html, base_url):
         ]
 
         for src in srcs:
-            if src:
-                full_url = urljoin(base_url, str(src))
-                if re.search(r"\.(mp4|webm|m3u8|mov)", full_url):
-                    sources.add(full_url)
+            if not src:
+                continue
+
+            full_url = urljoin(base_url, str(src))
+
+            if re.search(r"\.(mp4|webm|m3u8|mov)(\?.*)?$", full_url, re.IGNORECASE):
+                sources.add(full_url)
 
     for iframe in soup.find_all("iframe", src=True):
         if not isinstance(iframe, Tag):
@@ -582,7 +600,7 @@ def extract_video_sources(html, base_url):
             if not isinstance(script, Tag) or not isinstance(script.string, str):
                 continue
             matches = re.findall(
-                r'(https?://[^\s"\']+\.(?:mp4|webm|m3u8|mov))', script.string
+                r'(https?:\/\/[^"\']+\.(?:mp4|webm|m3u8|mov))', script.string
             )
             for match in matches:
                 full_url = urljoin(base_url, match)
@@ -829,7 +847,7 @@ async def search(query: str = "", power_scraping: bool = False):
 
     results = await advanced_search_async(query)
 
-    if not any(r.get("video_links") for r in results):
+    if not any(r.get("video_links", []) for r in results):
         video_results = [r for r in results if r.get("video_links")]
         print(f"[DEBUG] {len(video_results)} of {len(results)} had video_links")
         results = video_results or results[:5]
