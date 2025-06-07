@@ -113,10 +113,8 @@ kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
 
 
 def expand_query_semantically(query: str, top_n: int = 5):
-    raw_keywords = kw_model.extract_keywords(
+    raw_keywords = extract_keywords(
         query,
-        keyphrase_ngram_range=(1, 3),
-        use_mmr=True,
         diversity=0.8,
         top_n=top_n * 2,
     )
@@ -271,9 +269,7 @@ def duration_to_seconds(duration_str: str):
 def extract_tags(text: str, top_n: int = 10):
     clean = re.sub(r"[^a-zA-Z0-9\s]", "", text).lower()
 
-    raw_results = kw_model.extract_keywords(
-        clean, keyphrase_ngram_range=(1, 3), use_mmr=True, diversity=0.7, top_n=top_n
-    )  # type: ignore
+    raw_results = extract_keywords(clean, diversity=0.7, top_n=top_n)
 
     if raw_results and isinstance(raw_results[0], list):
         flat: List[Tuple[str, float]] = []
@@ -313,6 +309,16 @@ def is_probable_video_url(url: str):
     parsed = urlparse(url)
     path = parsed.path.lower()
     return any(path.endswith(ext) for ext in video_exts)
+
+
+def extract_keywords(text: str, top_n: int = 10, diversity=0.7):
+    return kw_model.extract_keywords(
+        text,
+        keyphrase_ngram_range=(1, 3),
+        use_mmr=True,
+        diversity=diversity,
+        top_n=top_n,
+    )
 
 
 # === 🌐 RENDER + EXTRACT ===
@@ -471,12 +477,7 @@ async def extract_metadata(html):
 
 # === 🔍 SEARCH PIPELINE ===
 def auto_generate_tags_from_text(text, top_k=5):
-    return [
-        kw
-        for kw, _ in kw_model.extract_keywords(
-            text, keyphrase_ngram_range=(1, 3), use_mmr=True, diversity=0.7, top_n=top_k
-        )
-    ]
+    return [kw for kw, _ in extract_keywords(text, diversity=0.7, top_n=top_k)]
 
 
 def extract_video_candidate_links(html: str, base_url: str):
