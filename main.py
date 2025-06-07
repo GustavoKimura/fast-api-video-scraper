@@ -418,9 +418,15 @@ async def auto_bypass_consent_dialog(page):
         for selector in selectors:
             element = await page.query_selector(selector)
             if element:
-                await element.click(force=True)
-                await page.wait_for_timeout(1000)
-                break
+                try:
+                    if await element.is_visible():
+                        print(f"[CONSENT] Clicking visible selector: {selector}")
+                        await element.click(force=True)
+                        await page.wait_for_timeout(1000)
+                        break
+                except Exception as e:
+                    if "not visible" not in str(e):
+                        print(f"[CONSENT ERROR] {e}")
     except Exception as e:
         print(f"[CONSENT ERROR] {e}")
 
