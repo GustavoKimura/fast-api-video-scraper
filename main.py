@@ -297,6 +297,11 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             for r in final:
                 r["score"] = (r["score"] - min_score) / (max_score - min_score)
 
+    for r in final:
+        logging.debug(
+            f"SCORE DEBUG - {r['score']:.4f} | {r.get('url', '')[:50]} | Tags: {r.get('tags', [])}"
+        )
+
     return sorted(final, key=lambda x: x["score"], reverse=True)
 
 
@@ -665,7 +670,18 @@ async def fetch_rendered_html_playwright(
                     req_url = route.request.url
                     if any(
                         ext in req_url.lower()
-                        for ext in [".mp4", ".webm", ".m3u8", ".ts", ".mov", ".mpd"]
+                        for ext in [
+                            ".mp4",
+                            ".webm",
+                            ".m3u8",
+                            ".ts",
+                            ".mov",
+                            ".mpd",
+                            "/get_file/",
+                            "/download/",
+                            "/hls/",
+                            "/flv/",
+                        ]
                     ):
                         if req_url not in video_requests:
                             logging.debug(f"INTERCEPT - Video URL: {req_url}")
@@ -716,6 +732,37 @@ async def fetch_rendered_html_playwright(
                         """window.alert = () => {}; window.confirm = () => true;""",
                     )
                     await page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                    await page.wait_for_timeout(2000)
+
+                    try:
+                        await page.click(
+                            "video, .thumb, .player, .video-thumb", timeout=3000
+                        )
+                        await page.wait_for_timeout(2000)
+                        logging.debug(
+                            "Clicked video/player element to trigger JS playback"
+                        )
+                    except Exception as e:
+                        logging.debug(
+                            f"No clickable player element found or failed to click: {e}"
+                        )
+
+                    try:
+                        await page.mouse.wheel(0, 1000)
+                        await page.wait_for_timeout(1000)
+                        logging.debug("Scrolled page to trigger lazy-load elements")
+                    except Exception as e:
+                        logging.debug(f"Scroll failed: {e}")
+
+                    try:
+                        await page.wait_for_selector(
+                            "video, source, iframe[src*='cdn'], script", timeout=5000
+                        )
+                    except Exception as e:
+                        logging.debug(
+                            f"No video/player selectors found during wait: {e}"
+                        )
+
                     html = await page.content()
                 except Exception as e:
                     logging.info(f"NAVIGATION ERROR - {url}: {e}")
@@ -860,6 +907,11 @@ async def auto_bypass_consent_dialog(page):
             "text=Yes",
             "text=Proceed",
             "text=I am 18+",
+            "text=Tenho mais de 18 anos",
+            "text=Tenho 18 anos",
+            "text=Entrar",
+            "text=Sim",
+            "text=Aceitar",
             "button:has-text('Enter')",
             "button:has-text('Continue')",
             "button:has-text('Accept')",
@@ -867,6 +919,7 @@ async def auto_bypass_consent_dialog(page):
             "button:has-text('Got it')",
             "button:has-text('Agree')",
             "button:has-text('Enter site')",
+            "button:has-text('Eu tenho mais de 18 anos')",
         ]
         for selector in selectors:
             try:
@@ -1093,7 +1146,8 @@ async def extract_video_metadata(url, query_embed, power_scraping):
         logging.error(f"No HTML content fetched from {url}")
         return None
     try:
-        debug_path = f"debug_{get_main_domain(url)}.html"
+        os.makedirs("debug_html", exist_ok=True)
+        debug_path = os.path.join("debug_html", f"debug_{get_main_domain(url)}.html")
         with open(debug_path, "w", encoding="utf-8") as f:
             f.write(html)
         logging.debug(f"Saved raw HTML to {debug_path}")
@@ -1160,8 +1214,8 @@ async def extract_video_metadata(url, query_embed, power_scraping):
                     if decoded not in video_links:
                         logging.debug(f"BASE64 VIDEO - Decoded and added: {decoded}")
                         video_links.append(decoded)
-            except Exception:
-                continue
+            except Exception as e:
+                logging.warning(f"BASE64 DECODE FAIL - {b64[:30]}...: {e}")
 
     try:
         text = content_extractor.get_content(html)
