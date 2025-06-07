@@ -17,6 +17,8 @@ from numpy.linalg import norm
 from collections import defaultdict, Counter
 from typing import List, Tuple
 from itertools import combinations
+from difflib import SequenceMatcher
+
 
 # === 🔒 DOMAIN CONCURRENCY CONTROL ===
 domain_counters = defaultdict(lambda: asyncio.Semaphore(4))
@@ -97,16 +99,24 @@ def expand_query_semantically(query: str, top_n: int = 5) -> List[str]:
         keyphrase_ngram_range=(1, 3),
         use_mmr=True,
         diversity=0.8,
-        top_n=top_n,
+        top_n=top_n * 2,
     )
+    query_vec = model_embed.encode(query)
+    filtered = []
 
-    keywords = []
-    for kw in raw_keywords:
-        if isinstance(kw, tuple) and isinstance(kw[0], str):
-            if kw[0].lower() != query.lower():
-                keywords.append(kw[0])
+    for kw, _ in raw_keywords:
+        kw = str(kw).strip()
+        kw_vec = model_embed.encode(kw)
+        sim = cosine_sim(query_vec, kw_vec)
 
-    return [query] + keywords
+        if not any(
+            SequenceMatcher(None, kw.lower(), existing_kw.lower()).ratio() >= 0.85
+            for existing_kw, _ in filtered
+        ):
+            filtered.append((kw, sim))
+
+    top_keywords = sorted(filtered, key=lambda x: x[1], reverse=True)[:top_n]
+    return [query] + [kw for kw, _ in top_keywords]
 
 
 # === 🧩 SEMANTIC RANKING ===
