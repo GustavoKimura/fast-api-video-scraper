@@ -476,13 +476,16 @@ def extract_keywords(text: str, top_n: int = 10, diversity=0.7):
 
 
 def is_sensible_keyword(kw):
-    if len(kw) > 40 or re.search(r"\d{6,}", kw):
+    if not kw or len(kw) > 40:
+        return False
+    if re.search(r"\d{6,}", kw):
         return False
     if re.fullmatch(r"[a-zA-Z0-9]{10,}", kw):
         return False
-    if kw.lower() in {"feedback", "error"}:
+    if re.search(r"[{}[\];<>$]", kw):
         return False
-    return True
+    bad_kw = {"feedback", "error", "null", "undefined", "function"}
+    return kw.lower() not in bad_kw
 
 
 def clean_tag_text(tag):
@@ -854,9 +857,13 @@ async def extract_video_metadata(url, query_embed):
         return None
 
     video_links = extract_video_sources(html, url)
-
     if not video_links:
         candidate_links = extract_video_candidate_links(html, url)
+        if not candidate_links:
+            print(f"[BAILOUT] No video sources or candidate links for {url}")
+            return None
+
+    if not video_links:
         for deep_url in rank_deep_links(candidate_links, query_embed)[:3]:
             deep_html = await fetch_rendered_html_playwright(deep_url)
             if (
@@ -950,18 +957,27 @@ async def extract_video_metadata(url, query_embed):
 # === 🔍 SEARCH PIPELINE ===
 async def search_engine_async(query, link_count):
     payload = {"q": query, "format": "json", "language": "en"}
-    async with ClientSession(timeout=timeout_obj) as session:
-        async with session.post(
-            SEARXNG_BASE_URL, data=payload, headers={"User-Agent": get_user_agent()}
-        ) as resp:
-            if resp.status != 200:
-                return []
-            data = await resp.json()
-            return [
-                r.get("url")
-                for r in data.get("results", [])
-                if is_valid_link(r.get("url"))
-            ][:link_count]
+    retries = 3
+    for attempt in range(retries):
+        try:
+            async with ClientSession(timeout=timeout_obj) as session:
+                async with session.post(
+                    SEARXNG_BASE_URL,
+                    data=payload,
+                    headers={"User-Agent": get_user_agent()},
+                ) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"HTTP {resp.status}")
+                    data = await resp.json()
+                    return [
+                        r.get("url")
+                        for r in data.get("results", [])
+                        if is_valid_link(r.get("url"))
+                    ][:link_count]
+        except Exception as e:
+            print(f"[SEARCH ERROR] Attempt {attempt+1}: {e}")
+            await asyncio.sleep(2 * (attempt + 1))
+    return []
 
 
 async def search_videos_async(query="4k videos", videos_to_return: int = 1):
@@ -978,7 +994,7 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
 
     async def worker(url):
         domain = get_main_domain(url)
-        print(f"[WORKER] Starting worker for: {url} (domain: {domain})")
+        print(f"[WORKER][QUERY: {query}] Starting worker for: {url}")
         async with sem, domain_counters[domain]:
             try:
                 result = await asyncio.wait_for(
@@ -1051,7 +1067,9 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
                     if num_new > 0:
                         results.append(result)
                         video_count += num_new
-                    print(f"[RESULT] Received result from task: {result.get('url')}")
+                    print(
+                        f"[RESULT][QUERY: {query}] Received result from task: {result.get('url')}"
+                    )
             except Exception as e:
                 print(f"[RESULT ERROR] Failed task: {e}")
 
@@ -1155,7 +1173,14 @@ async def search(query: str = "", power_scraping: bool = False):
                 "title": r["title"],
                 "description": r["description"],
                 "videos": [
-                    {k: v for k, v in video.items() if k != "score"}
+                    {
+                        **{k: v for k, v in video.items() if k != "score"},
+                        "duration": (
+                            video["duration"]
+                            if float(video.get("duration", 0)) > 0
+                            else "unknown"
+                        ),
+                    }
                     for video in r["videos"]
                 ],
             }
