@@ -556,6 +556,7 @@ async def search_engine_async(query, link_count):
 
 
 async def advanced_search_async(query):
+    seen_hashes = set()
     expanded_queries = expand_query_semantically(query)
     query_embed = model_embed.encode(query)
     all_links, results, processed = [], [], set()
@@ -565,9 +566,13 @@ async def advanced_search_async(query):
         domain = get_main_domain(url)
         async with sem, domain_counters[domain]:
             try:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     process_url_async(url, query_embed), timeout=12
                 )
+                if result and result.get("hash") not in seen_hashes:
+                    seen_hashes.add(result["hash"])
+                    return result
+                return None
             except asyncio.TimeoutError:
                 return None
 
