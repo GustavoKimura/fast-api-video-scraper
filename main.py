@@ -1,5 +1,5 @@
 # === 📦 IMPORTS ===
-import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json, base64, concurrent.futures, subprocess
+import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json, base64, concurrent.futures, subprocess, logging
 from urllib.parse import urlparse, urlunparse, urljoin
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -20,6 +20,24 @@ from itertools import combinations
 from difflib import SequenceMatcher
 from playwright_stealth import stealth_async
 from threading import Lock
+
+# === ℹ️ LOGGING ===
+start_time = time.monotonic()
+
+
+class ElapsedFormatter(logging.Formatter):
+    def format(self, record):
+        elapsed = time.monotonic() - start_time
+        record.elapsed_time = f"{elapsed:.2f}s"
+        return super().format(record)
+
+
+formatter_str = "%(elapsed_time)s [%(levelname)s] %(message)s"
+
+logging.basicConfig(level=logging.DEBUG, format=formatter_str)
+
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(ElapsedFormatter(formatter_str))
 
 # === 🧾 EXECUTOR ===
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=(os.cpu_count() or 4) * 2)
@@ -173,7 +191,7 @@ class OpenCLIPEmbedder:
                 features = self.model.encode_text(tokens).float()
             result = features.cpu().numpy()[0]
         except Exception as e:
-            print(f"[EMBED ERROR] Failed to encode '{text}': {e}")
+            logging.error(f"EMBED ERROR - Failed to encode '{text}': {e}")
             result = zeros((512,))
         with self._cache_lock:
             self._cache[text] = result
@@ -366,7 +384,7 @@ def duration_to_seconds(duration_str: str):
             return 0
         return hours * 3600 + minutes * 60 + seconds
     except ValueError:
-        print(f"[WARNING] Invalid duration format: {duration_str}")
+        logging.warning(f"Invalid duration format: {duration_str}")
         return 0
 
 
@@ -391,7 +409,7 @@ async def get_video_duration(url: str, html: str = "") -> float:
                 if duration > 0:
                     return duration
         except Exception as e:
-            print(f"[FFPROBE ERROR] {url}: {e}")
+            logging.error(f"FFPROBE ERROR - {url}: {e}")
 
     try:
         if html:
@@ -410,7 +428,7 @@ async def get_video_duration(url: str, html: str = "") -> float:
         if match:
             return int(match.group(1)) * 60
     except Exception as e:
-        print(f"[FALLBACK DURATION ERROR] {url}: {e}")
+        logging.error(f"FALLBACK DURATION ERROR - {url}: {e}")
 
     return 0.0
 
@@ -443,7 +461,7 @@ async def get_video_resolution_score(url: str) -> int:
                 )
                 return resolution_score + (bitrate_score // 1000)
         except Exception as e:
-            print(f"[FFPROBE-RES ERROR] {url}: {e}")
+            logging.error(f"FFPROBE-RES ERROR - {url}: {e}")
     return 0
 
 
@@ -639,7 +657,7 @@ async def fetch_rendered_html_playwright(
                         else await page.evaluate(script)
                     )
                 except Exception as e:
-                    print(f"[SAFE EVAL ERROR] {e}")
+                    logging.info(f"SAFE EVAL ERROR - {e}")
                     return None
 
             async def intercept_video_requests(route):
@@ -650,14 +668,14 @@ async def fetch_rendered_html_playwright(
                         for ext in [".mp4", ".webm", ".m3u8", ".ts", ".mov"]
                     ):
                         if req_url not in video_requests:
-                            print(f"[INTERCEPT] Video URL: {req_url}")
+                            logging.debug(f"INTERCEPT - Video URL: {req_url}")
                             video_requests.append(req_url)
                     await route.continue_()
                 except Exception as e:
                     if "Target page, context or browser has been closed" in str(e):
-                        print("[ROUTE WARNING] Route skipped after page closed.")
+                        logging.info("Route skipped after page closed.")
                     else:
-                        print(f"[ROUTE ERROR] {e}")
+                        logging.info(f"ROUTE ERROR - {e}")
 
             try:
                 context = await browser.new_context(
@@ -675,10 +693,10 @@ async def fetch_rendered_html_playwright(
                         url = response.url.lower()
                         if any(ext in url for ext in [".m3u8", ".ts", ".mpd"]):
                             if url not in video_requests:
-                                print(f"[STREAM RESPONSE] Found stream: {url}")
+                                logging.debug(f"STREAM RESPONSE - Found stream: {url}")
                                 video_requests.append(url)
                     except Exception as e:
-                        print(f"[STREAM RESPONSE ERROR] {e}")
+                        logging.info(f"STREAM RESPONSE ERROR - {e}")
 
                 page.on(
                     "response",
@@ -691,7 +709,7 @@ async def fetch_rendered_html_playwright(
                 try:
                     await stealth_async(page)
                 except Exception as e:
-                    print(f"[STEALTH ERROR] {e}")
+                    logging.info(f"STEALTH ERROR - {e}")
 
                 try:
                     await page.goto(url, timeout=timeout)
@@ -701,13 +719,13 @@ async def fetch_rendered_html_playwright(
                     )
                     await page.wait_for_load_state("domcontentloaded", timeout=timeout)
                 except Exception as e:
-                    print(f"[NAVIGATION ERROR] {url}: {e}")
+                    logging.info(f"NAVIGATION ERROR - {url}: {e}")
                     return "", []
 
                 try:
                     await page.locator("video source").first.wait_for(timeout=8000)
                 except:
-                    print("[INFO] No <source> tag found.")
+                    logging.info("No <source> tag found.")
 
                 await safe_evaluate(
                     page,
@@ -749,17 +767,17 @@ async def fetch_rendered_html_playwright(
                     if context:
                         await context.unroute("**/*")
                 except Exception as e:
-                    print(f"[UNROUTE ERROR] {e}")
+                    logging.info(f"UNROUTE ERROR - {e}")
                 try:
                     if page and not page.is_closed():
                         await page.close()
                 except Exception as e:
-                    print(f"[PAGE CLOSE ERROR] {e}")
+                    logging.info(f"PAGE CLOSE ERROR - {e}")
                 try:
                     if context:
                         await context.close()
                 except Exception as e:
-                    print(f"[CONTEXT CLOSE ERROR] {e}")
+                    logging.info(f"CONTEXT CLOSE ERROR - {e}")
 
             return content, [
                 v for v in set(video_requests) if not v.startswith("blob:")
@@ -773,7 +791,7 @@ async def fetch_rendered_html_playwright(
                 if html and html.strip():
                     return html, video_urls
             except Exception as e:
-                print(f"[RETRY {attempt}] Error fetching {url}: {e}")
+                logging.warning(f"RETRY {attempt} - Error fetching {url}: {e}")
             finally:
                 await asyncio.sleep(2 * (attempt + 1))
 
@@ -781,7 +799,7 @@ async def fetch_rendered_html_playwright(
             if browser:
                 await browser.close()
         except Exception as e:
-            print(f"[BROWSER CLOSE ERROR] {e}")
+            logging.error(f"BROWSER CLOSE ERROR - {e}")
 
     return "", []
 
@@ -850,9 +868,9 @@ async def auto_bypass_consent_dialog(page):
                         break
                 except Exception as e:
                     if "not visible" not in str(e):
-                        print(f"[CONSENT ERROR] {e}")
+                        logging.error(f"CONSENT ERROR - {e}")
     except Exception as e:
-        print(f"[CONSENT ERROR] {e}")
+        logging.error(f"CONSENT ERROR - {e}")
 
 
 async def extract_metadata(html, url):
@@ -935,7 +953,7 @@ def extract_video_candidate_links(html: str, base_url: str):
         ):
             urls.add(full_url)
 
-    print(f"[DEBUG] Deep candidate links from homepage: {len(urls)}")
+    logging.debug(f"Deep candidate links from homepage: {len(urls)}")
     return list(urls)[:20]
 
 
@@ -975,7 +993,7 @@ async def extract_video_sources(html, base_url, power_scraping):
                 )
                 sources.update(nested_sources)
             except Exception as e:
-                print(f"[IFRAME RECURSION ERROR] {iframe_url}: {e}")
+                logging.info(f"IFRAME RECURSION ERROR - {iframe_url}: {e}")
 
     for script in soup.find_all("script"):
         if not isinstance(script, Tag) or not script.string:
@@ -1041,9 +1059,9 @@ async def extract_video_sources(html, base_url, power_scraping):
             continue
 
     if sources:
-        print(f"[EXTRACTED] Found {len(sources)} video URLs")
+        logging.info(f"EXTRACTED - Found {len(sources)} video URLs")
 
-    print(f"[DEBUG] Found {len(sources)} video links on {base_url}")
+    logging.debug(f"Found {len(sources)} video links on {base_url}")
 
     sorted_sources = sorted(
         sources,
@@ -1060,15 +1078,15 @@ async def extract_video_metadata(url, query_embed, power_scraping):
 
     html, video_links = await fetch_rendered_html_playwright(url)
     if not html or not html.strip():
-        print(f"[ERROR] No HTML content fetched from {url}")
+        logging.error(f"No HTML content fetched from {url}")
         return None
     try:
         debug_path = f"debug_{get_main_domain(url)}.html"
         with open(debug_path, "w", encoding="utf-8") as f:
             f.write(html)
-        print(f"[DEBUG] Saved raw HTML to {debug_path}")
+        logging.debug(f"Saved raw HTML to {debug_path}")
     except Exception as e:
-        print(f"[DEBUG HTML SAVE ERROR] {e}")
+        logging.error(f"HTML SAVE ERROR - {e}")
 
     video_links = await extract_video_sources(html, url, power_scraping)
     candidate_links = []
@@ -1076,7 +1094,7 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     if not video_links:
         candidate_links = extract_video_candidate_links(html, url)
         if not candidate_links:
-            print(f"[BAILOUT] No video sources or candidate links for {url}")
+            logging.info(f"BAILOUT - No video sources or candidate links for {url}")
             return None
 
     if not video_links:
@@ -1099,7 +1117,7 @@ async def extract_video_metadata(url, query_embed, power_scraping):
                 if deep_sources:
                     return deep_url, deep_html, deep_sources
             except Exception as e:
-                print(f"[DEEP LINK ERROR] {deep_url}: {e}")
+                logging.error(f"DEEP LINK ERROR - {deep_url}: {e}")
             return None, None, None
 
         results = await asyncio.gather(
@@ -1128,7 +1146,7 @@ async def extract_video_metadata(url, query_embed, power_scraping):
                 decoded = base64.b64decode(b64.strip()).decode("utf-8")
                 if decoded.startswith("http") and is_probable_video_url(decoded):
                     if decoded not in video_links:
-                        print(f"[BASE64 VIDEO] Decoded and added: {decoded}")
+                        logging.debug(f"BASE64 VIDEO - Decoded and added: {decoded}")
                         video_links.append(decoded)
             except Exception:
                 continue
@@ -1136,7 +1154,7 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     try:
         text = content_extractor.get_content(html)
     except Exception as e:
-        print(f"[ERROR] boilerpy3 failed: {e}")
+        logging.error(f"boilerpy3 failed: {e}")
         text = ""
 
     if not text:
@@ -1155,7 +1173,7 @@ async def extract_video_metadata(url, query_embed, power_scraping):
         text = extract_content(html)
 
     if len(text) < 100:
-        print(f"[ERROR] Unable to extract usable text from {url}")
+        logging.error(f"Unable to extract usable text from {url}")
         return None
 
     lang = detect_language(text)
@@ -1176,30 +1194,30 @@ async def extract_video_metadata(url, query_embed, power_scraping):
             timeout=60 if power_scraping else 30,
         )
         if duration == 0.0:
-            print(f"[DURATION WARNING] No valid duration found for {url}")
+            logging.warning(f"No valid duration found for {url}")
 
         is_stream = False
         if "m3u8" in video_url:
-            print(f"[INFO] Stream detected (m3u8): {video_url}")
+            logging.info(f"Stream detected (m3u8): {video_url}")
             is_stream = True
             if duration == 0.0:
                 duration = 60.0
 
         if video_url.startswith("blob:"):
-            print(
-                f"[SKIP] Ignoring unsupported blob stream: {video_url} — parent: {url}"
+            logging.debug(
+                f"Ignoring unsupported blob stream: {video_url} — parent: {url}"
             )
             continue
 
         if duration == 0:
-            print(f"[WARNING] Accepting video with unknown duration: {video_url}")
+            logging.warning(f"Accepting video with unknown duration: {video_url}")
 
         if not tags:
-            print(f"[WARNING] Accepting video with no tags: {video_url}")
+            logging.warning(f"Accepting video with no tags: {video_url}")
 
         if not meta["title"].strip():
-            print(
-                f"[WARNING] Accepting video with no title, fallback to URL: {video_url}"
+            logging.warning(
+                f"Accepting video with no title, fallback to URL: {video_url}"
             )
 
         title = (
@@ -1262,10 +1280,10 @@ async def search_engine_async(query, link_count):
                 if results:
                     return results[:link_count]
         except Exception as e:
-            print(f"[SEARCH ERROR] Attempt {attempt+1}: {e}")
+            logging.info(f"SEARCH ERROR - Attempt {attempt+1}: {e}")
             await asyncio.sleep(2 * (attempt + 1))
 
-    print("[FALLBACK] Using partial data from last attempt.")
+    logging.info("FALLBACK - Using partial data from last attempt.")
 
     fallback = []
     for r in last_data.get("results", []) if last_data else []:
@@ -1288,7 +1306,7 @@ async def search_videos_async(
     expanded_queries = [q for q in expand_query_semantically(query) if q.strip()][:5]
     if not expanded_queries or all(not q.strip() for q in expanded_queries):
         expanded_queries = [query]
-    print(f"[DEBUG] Expanded queries: {expanded_queries}")
+    logging.debug(f"Expanded queries: {expanded_queries}")
 
     query_embed = model_embed.encode_cached(query)
     all_links, results, processed, seen_video_urls = [], [], set(), set()
@@ -1297,7 +1315,7 @@ async def search_videos_async(
 
     async def worker(url):
         domain = get_main_domain(url)
-        print(f"[WORKER] Starting: {url}")
+        logging.info(f"WORKER - Starting: {url}")
         async with sem, domain_counters[domain]:
             try:
                 try:
@@ -1306,7 +1324,9 @@ async def search_videos_async(
                         timeout=30 if not power_scraping else 60,
                     )
                 except asyncio.TimeoutError:
-                    print(f"[RETRY] Timeout, retrying with reduced timeout: {url}")
+                    logging.warning(
+                        f"RETRY - Timeout, retrying with reduced timeout: {url}"
+                    )
                     result = await asyncio.wait_for(
                         extract_video_metadata(url, query_embed, power_scraping),
                         timeout=45 if power_scraping else 30,
@@ -1315,9 +1335,9 @@ async def search_videos_async(
                 if result and result.get("videos"):
                     return url, result
             except asyncio.TimeoutError:
-                print(f"[TIMEOUT] {url}")
+                logging.warning(f"TIMEOUT - {url}")
             except Exception as e:
-                print(f"[WORKER ERROR] {url}: {e.__class__.__name__} - {e}")
+                logging.info(f"WORKER ERROR - {url}: {e.__class__.__name__} - {e}")
             return url, None
 
     i, tasks = 0, []
@@ -1327,11 +1347,11 @@ async def search_videos_async(
     while video_count < max_videos:
         elapsed = time.monotonic() - start_time
         if elapsed > max_time:
-            print(f"[TIMEOUT] Collected {video_count}/{max_videos}")
+            logging.info(f"TIMEOUT - Collected {video_count}/{max_videos}")
             break
 
         if i >= len(all_links):
-            print("[LOOP] Fetching more links...")
+            logging.info("LOOP - Fetching more links...")
             needed = max_videos - video_count
             cores = os.cpu_count() or 4
             ram_gb = psutil.virtual_memory().total // 1_073_741_824
@@ -1350,7 +1370,7 @@ async def search_videos_async(
                     all_links = list(dict.fromkeys(all_links))
                     collected.update(new_links)
                 except Exception as e:
-                    print(f"[LINK ERROR] {q}: {e}")
+                    logging.error(f"LINK ERROR - {q}: {e}")
 
         while i < len(all_links) and len(tasks) < MAX_PARALLEL_TASKS:
             url = all_links[i]
@@ -1367,11 +1387,11 @@ async def search_videos_async(
 
         for result in results_raw:
             if isinstance(result, BaseException):
-                print(f"[TASK ERROR] {type(result).__name__}: {result}")
+                logging.error(f"TASK ERROR - {type(result).__name__}: {result}")
                 continue
 
             if not isinstance(result, (tuple, list)) or len(result) != 2:
-                print(f"[TASK FORMAT ERROR] Unexpected result: {result}")
+                logging.error(f"TASK FORMAT ERROR - Unexpected result: {result}")
                 continue
 
             url, data = result
@@ -1393,12 +1413,12 @@ async def search_videos_async(
                 data["videos"] = accepted
                 results.append(data)
                 video_count += len(accepted)
-                print(
-                    f"[RESULT] {len(accepted)} accepted from {url} — total: {video_count}/{max_videos}"
+                logging.info(
+                    f"RESULT - {len(accepted)} accepted from {url} — total: {video_count}/{max_videos}"
                 )
 
                 if video_count >= max_videos:
-                    print("[SUCCESS] Target reached.")
+                    logging.info("SUCCESS - Target reached.")
                     break
 
         if video_count >= max_videos:
@@ -1417,8 +1437,8 @@ async def search_videos_async(
     ranked = ranked[:max_videos]
 
     if len(ranked) < max_videos:
-        print(
-            f"[FILLING] Only {len(ranked)}/{max_videos} ranked. Padding with fallback..."
+        logging.info(
+            f"FILLING - Only {len(ranked)}/{max_videos} ranked. Padding with fallback..."
         )
         seen_urls = {v["url"] for v in ranked}
         fallback = [v for v in all_videos if v["url"] not in seen_urls]
@@ -1447,8 +1467,8 @@ async def search_videos_async(
     results = list(grouped.values())
 
     if video_count < max_videos:
-        print(
-            f"[WARNING] Only {video_count}/{max_videos} collected. Consider increasing timeout or search depth."
+        logging.warning(
+            f"Only {video_count}/{max_videos} collected. Consider increasing timeout or search depth."
         )
 
     return results
@@ -1481,7 +1501,10 @@ def index():
 
 @app.get("/search")
 async def search(query: str = "", power_scraping: bool = False):
-    print("=== STARTING SEARCH ===")
+    global start_time
+    start_time = time.monotonic()
+
+    logging.info("=== STARTING SEARCH ===")
     MINIMUM_VIDEOS_TO_RETURN = 10
     videos_to_return = (
         min((os.cpu_count() or 4) * 10, 500)
@@ -1492,17 +1515,17 @@ async def search(query: str = "", power_scraping: bool = False):
     try:
         results = await search_videos_async(query, videos_to_return, power_scraping)
     except asyncio.TimeoutError:
-        print(f"[TIMEOUT] Search query timed out: {query}")
+        logging.info(f"TIMEOUT - Search query timed out: {query}")
         results = []
 
-    print(f"[RESULTS] Total results fetched: {len(results)}")
+    logging.info(f"RESULTS - Total results fetched: {len(results)}")
     video_results = [r for r in results if r.get("videos")]
 
     if video_results:
-        print(f"[RESULTS] {len(video_results)} result(s) contain videos")
+        logging.info(f"RESULTS - {len(video_results)} result(s) contain videos")
         results = video_results
     else:
-        print(f"[RESULTS] No videos found, falling back to raw results")
+        logging.info(f"RESULTS - No videos found, falling back to raw results")
 
     all_videos = []
     for result in results:
@@ -1514,7 +1537,7 @@ async def search(query: str = "", power_scraping: bool = False):
     try:
         deduped = await asyncio.wait_for(deduplicate_videos(all_videos), timeout=30)
     except asyncio.TimeoutError:
-        print("[DEDUPLICATION TIMEOUT] Skipping deduplication step")
+        logging.info("DEDUPLICATION TIMEOUT - Skipping deduplication step")
         deduped = all_videos
 
     ranked_videos = rank_by_similarity(deduped, query)[:videos_to_return]
@@ -1535,8 +1558,8 @@ async def search(query: str = "", power_scraping: bool = False):
 
     os.environ["DISABLE_POST_RESPONSE_LOGS"] = "1"
 
-    print("=== FINAL RESULTS JSON ===")
-    print(json.dumps(results, indent=2))
+    logging.debug("=== FINAL RESULTS JSON ===")
+    logging.debug(json.dumps(results, indent=2))
 
     return JSONResponse(
         content=[
