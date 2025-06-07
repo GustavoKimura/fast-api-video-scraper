@@ -151,8 +151,12 @@ def expand_query_semantically(query: str, top_n: int = 5):
         ):
             filtered.append((kw, sim))
 
-    top_keywords = sorted(filtered, key=lambda x: x[1], reverse=True)[:top_n]
-    return [query] + [kw for kw, _ in top_keywords]
+    top_keywords = [
+        kw
+        for kw, _ in sorted(filtered, key=lambda x: x[1], reverse=True)
+        if len(kw.split()) >= 2 and kw.lower() not in query.lower()
+    ][:top_n]
+    return [query] + top_keywords
 
 
 # === 🧩 SEMANTIC RANKING ===
@@ -486,21 +490,26 @@ def extract_keywords(text: str, top_n: int = 10, diversity=0.7):
 def is_sensible_keyword(kw):
     if not kw or len(kw) > 40:
         return False
+    if len(kw.split()) == 1 and len(kw) < 5:
+        return False
     if re.search(r"\d{6,}", kw):
         return False
     if re.fullmatch(r"[a-zA-Z0-9]{10,}", kw):
-        return False
-    if re.search(r"[{}[\];<>$]", kw):
         return False
     if re.fullmatch(r"[a-z0-9]{8,}", kw):
         return False
     if sum(c.isdigit() for c in kw) > len(kw) * 0.4:
         return False
+    if re.search(r"[{}[\];<>$]", kw):
+        return False
     if re.search(r"\b(ns|prod|widget|meta|error|stack)\b", kw.lower()):
         return False
     if len(re.findall(r"[a-zA-Z]", kw)) < len(kw) * 0.5:
         return False
-    return kw.lower() not in BAD_TAGS
+    if len(re.findall(r"[aeiouy]+", kw.lower())) < 2:
+        return False
+
+    return normalize_tag(kw) not in BAD_TAGS
 
 
 def clean_tag_text(tag):
@@ -554,6 +563,8 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
         video_requests = []
 
         async def intercept_video_requests(route):
+            html = ""
+
             try:
                 req_url = route.request.url
                 if any(
@@ -681,6 +692,11 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
 
             finally:
                 try:
+                    html = await page.content()
+                except Exception as e:
+                    print(f"[CONTENT ERROR] Failed to fetch page content: {e}")
+
+                try:
                     if page in context.pages:
                         await page.unroute_all(behavior="ignoreErrors")
                 except Exception as e:
@@ -696,12 +712,6 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                         await browser.close()
                 except Exception:
                     pass
-
-                html = ""
-                try:
-                    html = await page.content()
-                except Exception as e:
-                    print(f"[CONTENT ERROR] Failed to fetch page content: {e}")
                 return html
 
     for attempt in range(retries + 1):
