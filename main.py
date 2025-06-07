@@ -92,6 +92,18 @@ BLOCKED_DOMAINS = {
     "zhihu.com",
 }
 
+BAD_TAGS = [
+    "cookie",
+    "policy",
+    "access",
+    "block",
+    "label",
+    "html",
+    "optimize",
+    "minor",
+    "child",
+]
+
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
 
@@ -223,7 +235,12 @@ def normalize_url(url):
 
 def get_main_domain(url):
     ext = tldextract.extract(url)
-    return f"{ext.domain}.{ext.suffix}" if ext.suffix else ext.domain
+    if ext.suffix:
+        return f"{ext.domain}.{ext.suffix}"
+    elif ext.domain:
+        return ext.domain
+    else:
+        return urlparse(url).netloc
 
 
 def is_valid_link(url):
@@ -308,6 +325,7 @@ async def get_video_duration(url: str, html: str = "") -> float:
                 return duration
         except Exception as e:
             print(f"[FFPROBE ERROR] {url}: {e}")
+        duration = 0.0
 
     if html:
         try:
@@ -332,6 +350,12 @@ async def get_video_duration(url: str, html: str = "") -> float:
         minutes = int(match.group(1))
         seconds = int(match.group(2))
         return minutes * 60 + seconds
+
+    if duration == 0.0:
+        if "preview360p" in url.lower():
+            return 15.0
+        if "720p" in url.lower():
+            return 60.0
 
     return 0.0
 
@@ -397,25 +421,40 @@ def extract_tags(text: str, top_n: int = 10):
 
 def boost_by_tag_cooccurrence(results):
     co_pairs = Counter()
+    tag_boosts = {}
+    seen_tag_sets = {}
+
+    def canonical_tag(tag):
+        words = re.findall(r"\w+", tag.lower())
+        return tuple(sorted(set(words)))
+
     for r in results:
-        if not r.get("tags"):
+        tags_raw = r.get("tags", [])
+        if not tags_raw:
             fallback_tags = auto_generate_tags_from_text(
                 r.get("title", "") + " " + r.get("url", "")
             )
             if fallback_tags:
-                r["tags"] = fallback_tags
+                tags_raw = fallback_tags
 
-        tags = list(set(normalize_tag(tag) for tag in r.get("tags", [])))
-        for a, b in combinations(sorted(tags), 2):
+        canonical_tags = []
+        for tag in tags_raw:
+            norm = normalize_tag(tag)
+            can = canonical_tag(norm)
+            seen_tag_sets[norm] = can
+            canonical_tags.append(can)
+
+        unique_canonicals = list(set(canonical_tags))
+        for a, b in combinations(sorted(unique_canonicals), 2):
             co_pairs[(a, b)] += 1
 
-    tag_boosts = {}
     for (a, b), count in co_pairs.items():
         if count >= 2:
-            tag_boosts.setdefault(a, 0)
-            tag_boosts.setdefault(b, 0)
-            tag_boosts[a] += 0.05
-            tag_boosts[b] += 0.05
+            for tag in [a, b]:
+                name = " ".join(tag)
+                tag_boosts.setdefault(name, 0)
+                tag_boosts[name] += 0.05
+
     return tag_boosts
 
 
@@ -448,7 +487,7 @@ def is_sensible_keyword(kw):
 
 def clean_tag_text(tag):
     tag = re.sub(r"(.)\1{2,}", r"\1", tag)
-    tag = re.sub(r"([a-z])([A-Z])", r"\1 \2", tag)
+    tag = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", tag)
     tag = re.sub(r"([a-z])(\d+)", r"\1 \2", tag)
     return tag.lower().strip()
 
@@ -620,7 +659,7 @@ async def auto_bypass_consent_dialog(page):
         print(f"[CONSENT ERROR] {e}")
 
 
-async def extract_metadata(html):
+async def extract_metadata(html, url):
     soup = BeautifulSoup(html, "lxml")
     title = (
         soup.title.string if soup.title and isinstance(soup.title.string, str) else ""
@@ -641,6 +680,13 @@ async def extract_metadata(html):
         if isinstance(author_tag, Tag) and author_tag.has_attr("content")
         else ""
     )
+
+    if not title:
+        try:
+            doc = Document(html)
+            title = doc.short_title()
+        except:
+            title = urlparse(url).netloc
 
     return {
         "title": title.strip() if isinstance(title, str) else "",
@@ -664,7 +710,12 @@ def auto_generate_tags_from_text(text, top_k=5):
     return [
         normalize_tag(kw)
         for kw, _ in flat
-        if isinstance(kw, str) and is_sensible_keyword(kw)
+        if (
+            isinstance(kw, str)
+            and is_sensible_keyword(kw)
+            and len(kw.split()) <= 4
+            and not any(bad in kw for bad in BAD_TAGS)
+        )
     ]
 
 
@@ -678,10 +729,15 @@ def extract_video_candidate_links(html: str, base_url: str):
         full_url = urljoin(base_url, href).split("?")[0].split("#")[0]
         if not is_valid_link(full_url):
             continue
-        if is_probable_video_url(full_url) or href.lower().endswith(
-            (".mp4", ".webm", ".m3u8")
+
+        if (
+            is_probable_video_url(full_url)
+            or href.lower().endswith((".mp4", ".webm", ".m3u8"))
+            or "/video" in href.lower()
+            or re.search(r"/\d{4,}", href)
         ):
             urls.add(full_url)
+
     print(f"[DEBUG] Deep candidate links from homepage: {len(urls)}")
     return list(urls)[:20]
 
@@ -766,15 +822,6 @@ def extract_video_sources(html, base_url):
             if isinstance(content, str):
                 sources.add(urljoin(base_url, content))
 
-    for el in soup.find_all(["div", "span", "a", "button"]):
-        if not isinstance(el, Tag):
-            continue
-        for attr_name, attr_value in el.attrs.items():
-            if isinstance(attr_value, str) and "video" in attr_name.lower():
-                full_url = urljoin(base_url, attr_value)
-                if is_probable_video_url(full_url):
-                    sources.add(full_url)
-
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             if not isinstance(script, Tag) or not script.string:
@@ -793,6 +840,7 @@ def extract_video_sources(html, base_url):
     if sources:
         print(f"[EXTRACTED] Found {len(sources)} video URLs")
 
+    print(f"[DEBUG] Found {len(sources)} video links on {base_url}")
     return list(dict.fromkeys(sorted(sources)))
 
 
@@ -809,8 +857,7 @@ async def extract_video_metadata(url, query_embed):
 
     if not video_links:
         candidate_links = extract_video_candidate_links(html, url)
-        ranked_links = rank_deep_links(candidate_links, query_embed)
-        for deep_url in ranked_links[:5]:
+        for deep_url in rank_deep_links(candidate_links, query_embed)[:3]:
             deep_html = await fetch_rendered_html_playwright(deep_url)
             if (
                 "404" in deep_html
@@ -824,25 +871,6 @@ async def extract_video_metadata(url, query_embed):
                 url = deep_url
                 video_links = deep_sources
                 break
-
-    deep_links = rank_deep_links(extract_video_candidate_links(html, url), query_embed)
-
-    for deep_url in deep_links[:5]:
-        deep_html = await fetch_rendered_html_playwright(deep_url)
-        if (
-            not deep_html
-            or "<html" in deep_html
-            and "</html>" in deep_html
-            and len(deep_html) < 1000
-        ):
-            continue
-        if (
-            re.search(r"\.(mp4|webm|m3u8|mov)", deep_html, re.IGNORECASE)
-            or "<video" in deep_html
-        ):
-            html = deep_html
-            url = deep_url
-            break
 
     try:
         text = content_extractor.get_content(html)
@@ -869,7 +897,7 @@ async def extract_video_metadata(url, query_embed):
     if lang != "en":
         text = translate_text(text)
 
-    meta = await extract_metadata(html)
+    meta = await extract_metadata(html, url)
     tags = auto_generate_tags_from_text(f"{text.strip()} {meta['title']}", top_k=10)
 
     videos = []
@@ -889,7 +917,12 @@ async def extract_video_metadata(url, query_embed):
                 f"[WARNING] Accepting video with no title, fallback to URL: {video_url}"
             )
 
-        title = meta["title"] or urlparse(video_url).path.split("/")[-1] or "Untitled"
+        title = (
+            meta["title"]
+            or os.path.basename(urlparse(video_url).path.rstrip("/"))
+            or urlparse(video_url).netloc
+            or "Untitled"
+        )
 
         videos.append(
             {
@@ -901,8 +934,8 @@ async def extract_video_metadata(url, query_embed):
             }
         )
 
-        if not videos:
-            return None
+    if not videos:
+        return None
 
     videos = await deduplicate_videos(videos)
 
