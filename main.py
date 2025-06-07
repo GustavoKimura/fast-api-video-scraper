@@ -145,7 +145,11 @@ def cosine_sim(a, b):
 
 def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
     query_embed = model_embed.encode(query)
-    query_tags = {kw for kw, _ in extract_tags(query)}
+
+    # Safely extract just the keyword strings
+    raw_tags = extract_tags(query)
+    query_tags = {kw for kw, _ in raw_tags if isinstance(kw, str)}
+
     tag_boosts = boost_by_tag_cooccurrence(results)
     seen_domains = set()
     final = []
@@ -164,14 +168,11 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             tag_text = " ".join(r["tags"])
             tag_embed = model_embed.encode(tag_text)
             sim = cosine_sim(query_embed, tag_embed)
-            result_tags = {
-                re.sub(r"[^a-z0-9]", "", tag.lower()) for tag in r.get("tags", [])
-            }
-            query_tags_norm = {
-                re.sub(r"[^a-z0-9]", "", tag.lower()) for tag, _ in query_tags
-            }
+            result_tags = normalize_tags(r.get("tags", []))
+            query_tags_norm = normalize_tags(list(query_tags))
             overlap = len(query_tags_norm & result_tags)
-            boost = sum(tag_boosts.get(tag, 0) for tag in r["tags"])
+            boost = sum(tag_boosts.get(normalize_tag(tag), 0) for tag in r["tags"])
+
             score = sim + 0.05 * overlap + boost
 
         domain = get_main_domain(r["url"])
@@ -339,7 +340,7 @@ def extract_tags(text: str, top_n: int = 10):
 def boost_by_tag_cooccurrence(results):
     co_pairs = Counter()
     for r in results:
-        tags = list(set(tag.lower() for tag in r.get("tags", [])))
+        tags = list(set(normalize_tag(tag) for tag in r.get("tags", [])))
         for a, b in combinations(sorted(tags), 2):
             co_pairs[(a, b)] += 1
 
@@ -378,6 +379,14 @@ def is_sensible_keyword(kw):
     if kw.lower() in {"feedback", "error"}:
         return False
     return True
+
+
+def normalize_tag(tag: str):
+    return re.sub(r"[^a-z0-9]", "", tag.lower())
+
+
+def normalize_tags(tags: list[str]):
+    return {normalize_tag(tag) for tag in tags}
 
 
 # === 🌐 RENDER + EXTRACT ===
@@ -540,10 +549,21 @@ async def extract_metadata(html):
 
 
 def auto_generate_tags_from_text(text, top_k=5):
+    raw = extract_keywords(text, diversity=0.7, top_n=top_k)
+    flat: List[Tuple[str, float]] = []
+
+    for item in raw:
+        if isinstance(item, tuple) and isinstance(item[0], str):
+            flat.append(item)
+        elif isinstance(item, list):
+            flat.extend(
+                x for x in item if isinstance(x, tuple) and isinstance(x[0], str)
+            )
+
     return [
-        kw
-        for kw, _ in extract_keywords(text, diversity=0.7, top_n=top_k)
-        if is_sensible_keyword(kw)
+        normalize_tag(kw)
+        for kw, _ in flat
+        if isinstance(kw, str) and is_sensible_keyword(kw)
     ]
 
 
