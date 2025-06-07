@@ -156,7 +156,7 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
         except (ValueError, TypeError):
             continue
 
-        if not (min_duration <= dur_secs <= max_duration):
+        if dur_secs <= 0 or not (min_duration <= dur_secs <= max_duration):
             continue
 
         score = 0.0
@@ -348,54 +348,78 @@ def extract_keywords(text: str, top_n: int = 10, diversity=0.7):
     )
 
 
+def is_sensible_keyword(kw):
+    if len(kw) > 40 or re.search(r"\d{6,}", kw):
+        return False
+    if re.fullmatch(r"[a-zA-Z0-9]{10,}", kw):
+        return False
+    if kw.lower() in {"feedback", "error"}:
+        return False
+    return True
+
+
 # === 🌐 RENDER + EXTRACT ===
-async def fetch_rendered_html_playwright(url, timeout=150000):
-    browser = None
-    async with async_playwright() as p:
-        try:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-web-security",
-                ],
+async def fetch_rendered_html_playwright(url, timeout=150000, retries=2):
+    async def _internal_fetch_with_playwright(url, timeout):
+        browser = None
+
+        async with async_playwright() as p:
+            try:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-web-security",
+                    ],
+                )
+            except Exception as e:
+                print(f"[PLAYWRIGHT ERROR] Launch failed: {e}")
+                return ""
+
+            context = await browser.new_context(
+                user_agent=get_user_agent(),
+                viewport={"width": 1280, "height": 720},
+                java_script_enabled=True,
+                bypass_csp=True,
+                locale="en-US",
             )
-        except Exception as e:
-            print(f"[PLAYWRIGHT ERROR] Launch failed: {e}")
-            return ""
 
-        context = await browser.new_context(
-            user_agent=get_user_agent(),
-            viewport={"width": 1280, "height": 720},
-            java_script_enabled=True,
-            bypass_csp=True,
-            locale="en-US",
-        )
+            page = await context.new_page()
 
-        page = await context.new_page()
+            try:
+                await stealth_async(page)
+            except Exception as e:
+                print(f"[PLAYWRIGHT WARNING] Failed to apply stealth: {e}")
 
+            try:
+                await page.goto(url, timeout=timeout)
+                await page.wait_for_load_state("domcontentloaded")
+
+                for _ in range(3):
+                    await page.evaluate(
+                        "window.scrollBy(0, document.body.scrollHeight)"
+                    )
+                    await page.wait_for_timeout(800)
+
+                await auto_bypass_consent_dialog(page)
+
+                html = await page.content()
+                return html
+            except Exception as e:
+                print(f"[PLAYWRIGHT ERROR] Failed to load {url}: {e}")
+                return ""
+
+    for attempt in range(retries + 1):
         try:
-            await stealth_async(page)
+            html = await _internal_fetch_with_playwright(url, timeout)
+            if html.strip():
+                return html
         except Exception as e:
-            print(f"[PLAYWRIGHT WARNING] Failed to apply stealth: {e}")
-
-        try:
-            await page.goto(url, timeout=timeout)
-            await page.wait_for_load_state("domcontentloaded")
-
-            for _ in range(3):
-                await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(800)
-
-            await auto_bypass_consent_dialog(page)
-
-            html = await page.content()
-            return html
-        except Exception as e:
-            print(f"[PLAYWRIGHT ERROR] Failed to load {url}: {e}")
-            return ""
+            print(f"[RETRY {attempt}] Playwright failed: {e}")
+        await asyncio.sleep(2 * (attempt + 1))
+    return ""
 
 
 def preprocess_html(html):
@@ -494,7 +518,11 @@ async def extract_metadata(html):
 
 
 def auto_generate_tags_from_text(text, top_k=5):
-    return [kw for kw, _ in extract_keywords(text, diversity=0.7, top_n=top_k)]
+    return [
+        kw
+        for kw, _ in extract_keywords(text, diversity=0.7, top_n=top_k)
+        if is_sensible_keyword(kw)
+    ]
 
 
 def extract_video_candidate_links(html: str, base_url: str):
@@ -707,6 +735,10 @@ async def extract_video_metadata(url, query_embed):
         if duration == 0.0:
             print(f"[DURATION WARNING] No valid duration found for {url}")
 
+        if not meta["title"].strip() or duration == 0 or len(tags) < 2:
+            print(f"[SKIP] Rejecting low-quality video: {video_url}")
+            continue
+
         videos.append(
             {
                 "url": video_url,
@@ -716,6 +748,9 @@ async def extract_video_metadata(url, query_embed):
                 "score": 0.0,
             }
         )
+
+        if not videos:
+            return None
 
     return {
         "url": url,
@@ -875,17 +910,41 @@ async def search(query: str = "", power_scraping: bool = False):
     else:
         print(f"[RESULTS] No videos found, falling back to raw results")
 
-    results = sorted(results, key=lambda x: -len(x.get("videos", [])))
+    all_videos = []
+    for result in results:
+        for video in result.get("videos", []):
+            video["parent_url"] = result["url"]
+            video["source_title"] = result["title"]
+            all_videos.append(video)
 
+    ranked_videos = rank_by_similarity(all_videos, query)
+
+    ranked_results = {}
+    for video in ranked_videos:
+        parent_url = video["parent_url"]
+        if parent_url not in ranked_results:
+            ranked_results[parent_url] = {
+                "url": parent_url,
+                "title": video.get("source_title", ""),
+                "description": "",
+                "videos": [],
+            }
+        ranked_results[parent_url]["videos"].append(video)
+
+    results = list(ranked_results.values())
     print("=== FINAL RESULTS JSON ===")
     print(json.dumps(results, indent=2))
+
     return JSONResponse(
         content=[
             {
                 "url": r["url"],
                 "title": r["title"],
                 "description": r["description"],
-                "videos": r["videos"],
+                "videos": [
+                    {k: v for k, v in video.items() if k != "score"}
+                    for video in r["videos"]
+                ],
             }
             for r in results
         ]
