@@ -783,8 +783,8 @@ async def search(query: str = "", power_scraping: bool = False):
         VIDEOS_TO_SEARCH = min(cores * 30, 1000)
         VIDEO_RESULTS_LIMIT = min(cores * 10, 500)
     else:
-        VIDEOS_TO_SEARCH = 10
-        VIDEO_RESULTS_LIMIT = 5
+        VIDEOS_TO_SEARCH = 5
+        VIDEO_RESULTS_LIMIT = 1
 
     results = await search_videos_async(query)
     print(f"[RESULTS] Total results fetched: {len(results)}")
