@@ -191,7 +191,7 @@
       </div>
     </template>
 
-    <template x-if="!loading && !error && results.length === 0">
+    <template x-if="searched && !loading && !error && results.length === 0">
       <div class="loading">No results found. Try a different search.</div>
     </template>
 
@@ -260,6 +260,7 @@
         return {
           query: "",
           powerScraping: false,
+          searched: false,
           results: [],
           loading: false,
           error: false,
@@ -269,6 +270,7 @@
               this.results = [];
               return;
             }
+            this.searched = true;
             this.loading = true;
             this.error = false;
             this.results = [];
