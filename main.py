@@ -620,6 +620,10 @@ async def advanced_search_async(query):
                 tasks.append(asyncio.create_task(worker(url)))
             i += 1
 
+        if not tasks:
+            await asyncio.sleep(0.1)
+            continue
+
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for d in done:
             tasks.remove(d)
