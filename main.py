@@ -146,7 +146,6 @@ def cosine_sim(a, b):
 def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
     query_embed = model_embed.encode(query)
 
-    # Safely extract just the keyword strings
     raw_tags = extract_tags(query)
     query_tags = {kw for kw, _ in raw_tags if isinstance(kw, str)}
 
@@ -160,8 +159,12 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
         except (ValueError, TypeError):
             continue
 
-        if dur_secs <= 0 or not (min_duration <= dur_secs <= max_duration):
-            continue
+        if dur_secs <= 0:
+            score_penalty = 0.1
+        else:
+            if not (min_duration <= dur_secs <= max_duration):
+                continue
+            score_penalty = 0.0
 
         score = 0.0
         if r.get("tags"):
@@ -172,7 +175,6 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             query_tags_norm = normalize_tags(list(query_tags))
             overlap = len(query_tags_norm & result_tags)
             boost = sum(tag_boosts.get(normalize_tag(tag), 0) for tag in r["tags"])
-
             score = sim + 0.05 * overlap + boost
 
         domain = get_main_domain(r["url"])
@@ -181,8 +183,20 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
         else:
             seen_domains.add(domain)
 
-        r["score"] = score
+        if score == 0.0 and r.get("title"):
+            title_embed = model_embed.encode(r["title"])
+            score = cosine_sim(query_embed, title_embed) * 0.6
+
+        r["score"] = score - score_penalty
         final.append(r)
+
+    if final:
+        scores = [r["score"] for r in final]
+        min_score = min(scores)
+        max_score = max(scores)
+        if max_score > min_score:
+            for r in final:
+                r["score"] = (r["score"] - min_score) / (max_score - min_score)
 
     return sorted(final, key=lambda x: x["score"], reverse=True)
 
@@ -384,6 +398,13 @@ def extract_tags(text: str, top_n: int = 10):
 def boost_by_tag_cooccurrence(results):
     co_pairs = Counter()
     for r in results:
+        if not r.get("tags"):
+            fallback_tags = auto_generate_tags_from_text(
+                r.get("title", "") + " " + r.get("url", "")
+            )
+            if fallback_tags:
+                r["tags"] = fallback_tags
+
         tags = list(set(normalize_tag(tag) for tag in r.get("tags", [])))
         for a, b in combinations(sorted(tags), 2):
             co_pairs[(a, b)] += 1
