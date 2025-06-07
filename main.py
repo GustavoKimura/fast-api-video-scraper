@@ -49,8 +49,8 @@ def dynamic_parallel_task_limit():
 
 
 MAX_PARALLEL_TASKS = dynamic_parallel_task_limit()
-LINKS_TO_SCRAP = 10
-SUMMARIES = 5
+VIDEOS_TO_SEARCH = 10
+VIDEO_RESULTS_LIMIT = 5
 
 DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
@@ -491,7 +491,7 @@ def auto_generate_tags_from_text(text, top_k=5):
     ]
 
 
-def extract_deep_links(html: str, base_url: str) -> list[str]:
+def extract_video_candidate_links(html: str, base_url: str) -> list[str]:
     soup = BeautifulSoup(html, "lxml")
     urls = set()
 
@@ -620,7 +620,7 @@ def extract_video_sources(html, base_url):
     return list(dict.fromkeys(sorted(sources)))
 
 
-async def process_url_async(url, query_embed):
+async def extract_video_metadata(url, query_embed):
     if not is_valid_link(url):
         return None
 
@@ -634,7 +634,7 @@ async def process_url_async(url, query_embed):
         print(f"[DEBUG] Extracted {len(video_links)} video links from {url}")
     else:
         print(f"[DEBUG] No direct video links, trying to expand from homepage: {url}")
-        candidate_links = extract_deep_links(html, url)
+        candidate_links = extract_video_candidate_links(html, url)
         ranked_links = rank_deep_links(candidate_links, query_embed)
 
         for deep_url in ranked_links[:5]:
@@ -663,7 +663,7 @@ async def process_url_async(url, query_embed):
         f"[DEBUG] HTML from {url} contains {len(video_elements)} <video>/<source> tags"
     )
     print(f"[DEBUG] Found {len(video_links)} video sources at {url}")
-    deep_links = rank_deep_links(extract_deep_links(html, url), query_embed)
+    deep_links = rank_deep_links(extract_video_candidate_links(html, url), query_embed)
     print(f"[DEBUG] Deep links from {url}: {len(deep_links)}")
 
     for deep_url in deep_links[:5]:
@@ -710,19 +710,15 @@ async def process_url_async(url, query_embed):
     if lang != "en":
         text = translate_text(text)
 
-    text_hash = hashlib.md5(text.encode()).hexdigest()
     meta = await extract_metadata(html)
     tags = auto_generate_tags_from_text(f"{text.strip()} {meta['title']}", top_k=10)
     result = {
         "url": url,
-        "summary": text.strip(),
         "video_links": video_links,
-        "hash": text_hash,
-        "title": meta["title"],
+        "title": meta["title"] or urlparse(url).netloc,
         "description": meta["description"],
-        "author": meta["author"],
-        "language": "en",
         "tags": tags,
+        "score": 0.0,
     }
 
     if not result["video_links"]:
@@ -747,8 +743,7 @@ async def search_engine_async(query, link_count):
             ][:link_count]
 
 
-async def advanced_search_async(query):
-    seen_hashes = set()
+async def search_videos_async(query):
     expanded_queries = list(dict.fromkeys(expand_query_semantically(query)))
     print(f"[DEBUG] Expanded queries: {expanded_queries}")
 
@@ -762,23 +757,15 @@ async def advanced_search_async(query):
         print(f"[WORKER] Starting worker for: {url} (domain: {domain})")
         async with sem, domain_counters[domain]:
             try:
-                print(f"[WORKER] Calling process_url_async for: {url}")
+                print(f"[WORKER] Calling extract_video_metadata for: {url}")
                 result = await asyncio.wait_for(
-                    process_url_async(url, query_embed), timeout=60
+                    extract_video_metadata(url, query_embed), timeout=60
                 )
-                print(f"[WORKER] process_url_async completed for: {url}")
+                print(f"[WORKER] extract_video_metadata completed for: {url}")
 
                 if not result:
                     print(f"[WORKER] No result for: {url}")
                     return None
-
-                if result.get("hash") in seen_hashes:
-                    print(f"[WORKER] Duplicate result hash for: {url}")
-                    return None
-
-                print(f"[WORKER] Valid result from: {url}, hash: {result.get('hash')}")
-                seen_hashes.add(result["hash"])
-                return result
 
             except asyncio.TimeoutError:
                 print(f"[WORKER TIMEOUT] {url}")
@@ -791,7 +778,7 @@ async def advanced_search_async(query):
     max_time = 90
     start_time = time.monotonic()
 
-    while len(results) < SUMMARIES:
+    while len(results) < VIDEO_RESULTS_LIMIT:
         elapsed = time.monotonic() - start_time
         if int(elapsed) % 10 == 0:
             print(f"[LOOP] {len(results)} results so far after {int(elapsed)}s")
@@ -805,7 +792,7 @@ async def advanced_search_async(query):
             for q in expanded_queries:
                 try:
                     links = await search_engine_async(
-                        q, LINKS_TO_SCRAP // len(expanded_queries)
+                        q, VIDEOS_TO_SEARCH // len(expanded_queries)
                     )
                     new_links = [u for u in links if u not in collected]
                     all_links += new_links
@@ -847,11 +834,7 @@ async def advanced_search_async(query):
         done, _ = await asyncio.wait(tasks, timeout=15)
         for d in done:
             try:
-                result = d.result()
-                if result and result.get("hash") not in seen_hashes:
-                    print(f"[FINAL RESULT] {result.get('url')}")
-                    seen_hashes.add(result["hash"])
-                    results.append(result)
+                results.append(d.result())
             except Exception as e:
                 print(f"[FINAL RESULT ERROR] {e}")
 
@@ -888,17 +871,17 @@ async def search(query: str = "", power_scraping: bool = False):
         "----------------------------------------------------------------------------------------------------"
     )
 
-    global LINKS_TO_SCRAP, SUMMARIES
+    global VIDEOS_TO_SEARCH, VIDEO_RESULTS_LIMIT
 
     if power_scraping:
         cores = os.cpu_count() or 4
-        LINKS_TO_SCRAP = min(cores * 30, 1000)
-        SUMMARIES = min(cores * 10, 500)
+        VIDEOS_TO_SEARCH = min(cores * 30, 1000)
+        VIDEO_RESULTS_LIMIT = min(cores * 10, 500)
     else:
-        LINKS_TO_SCRAP = 10
-        SUMMARIES = 5
+        VIDEOS_TO_SEARCH = 10
+        VIDEO_RESULTS_LIMIT = 5
 
-    results = await advanced_search_async(query)
+    results = await search_videos_async(query)
     print(f"[RESULTS] Total results fetched: {len(results)}")
 
     video_results = [r for r in results if r.get("video_links")]
@@ -906,14 +889,12 @@ async def search(query: str = "", power_scraping: bool = False):
         print(f"[RESULTS] {len(video_results)} result(s) contain video_links")
         results = video_results
     else:
-        print(
-            f"[RESULTS] No video_links found, falling back to top 5 summaries by score"
-        )
+        print(f"[RESULTS] No video_links found, falling back to top 5 videos by score")
         results = sorted(
             results,
             key=lambda x: (
                 x.get("score", 0),
-                -len(x["summary"]),
+                -len(x["description"]),
                 get_main_domain(x["url"]),
             ),
         )
@@ -924,10 +905,12 @@ async def search(query: str = "", power_scraping: bool = False):
     return JSONResponse(
         content=[
             {
-                "title": r["title"] or (r["summary"][:60] + "...") or r["url"],
-                "summary": r["summary"],
-                "video_links": r.get("video_links", []),
-                "tags": r.get("tags", []),
+                "url": r["url"],
+                "title": r["title"],
+                "description": r["description"],
+                "video_links": r["video_links"],
+                "tags": r["tags"],
+                "video_score": r["score"],
             }
             for r in results
         ]
