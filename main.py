@@ -713,8 +713,6 @@ async def search_videos_async(query):
             url = all_links[i]
             if url not in processed:
                 tasks.append(asyncio.create_task(worker(url)))
-            else:
-                print(f"[TASK] URL already processed: {url}")
             i += 1
 
         if not tasks:
@@ -731,8 +729,6 @@ async def search_videos_async(query):
                 if result:
                     print(f"[RESULT] Received result from task: {result.get('url')}")
                     results.append(result)
-                else:
-                    print("[RESULT] Task returned None.")
             except Exception as e:
                 print(f"[RESULT ERROR] Failed task: {e}")
 
