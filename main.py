@@ -896,6 +896,9 @@ async def search_engine_async(query, link_count):
 
 
 async def search_videos_async(query="4k videos", videos_to_search: int = 1):
+    video_count = 0
+    max_videos = videos_to_search
+
     expanded_queries = list(dict.fromkeys(expand_query_semantically(query)))
     print(f"[DEBUG] Expanded queries: {expanded_queries}")
 
@@ -929,7 +932,7 @@ async def search_videos_async(query="4k videos", videos_to_search: int = 1):
     max_time = 90
     start_time = time.monotonic()
 
-    while len(results) < videos_to_search:
+    while video_count < max_videos:
         elapsed = time.monotonic() - start_time
         if elapsed > max_time:
             print("[LOOP] Max time reached, exiting loop.")
@@ -972,8 +975,14 @@ async def search_videos_async(query="4k videos", videos_to_search: int = 1):
             try:
                 result = d.result()
                 if result:
+                    num_new = len(result.get("videos", []))
+                    if video_count + num_new > max_videos:
+                        result["videos"] = result["videos"][: max_videos - video_count]
+                        num_new = len(result["videos"])
+                    if num_new > 0:
+                        results.append(result)
+                        video_count += num_new
                     print(f"[RESULT] Received result from task: {result.get('url')}")
-                    results.append(result)
             except Exception as e:
                 print(f"[RESULT ERROR] Failed task: {e}")
 
@@ -981,7 +990,16 @@ async def search_videos_async(query="4k videos", videos_to_search: int = 1):
         done, _ = await asyncio.wait(tasks, timeout=15)
         for d in done:
             try:
-                results.append(d.result())
+                result = d.result()
+                if result:
+                    num_new = len(result.get("videos", []))
+                    if video_count + num_new > max_videos:
+                        result["videos"] = result["videos"][: max_videos - video_count]
+                        num_new = len(result["videos"])
+                    if num_new > 0:
+                        results.append(result)
+                        video_count += num_new
+                        print(f"[FINAL RESULT] Received from: {result.get('url')}")
             except Exception as e:
                 print(f"[FINAL RESULT ERROR] {e}")
 
@@ -1036,6 +1054,8 @@ async def search(query: str = "", power_scraping: bool = False):
             all_videos.append(video)
 
     ranked_videos = rank_by_similarity(await deduplicate_videos(all_videos), query)
+    if not power_scraping:
+        ranked_videos = ranked_videos[:1]
 
     ranked_results = {}
     for video in ranked_videos:
