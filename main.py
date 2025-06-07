@@ -251,7 +251,7 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
         except (ValueError, TypeError):
             continue
 
-        if dur_secs <= 0:
+        if dur_secs < 0:
             continue
         else:
             if not (min_duration <= dur_secs <= max_duration):
@@ -665,17 +665,15 @@ async def fetch_rendered_html_playwright(
                     req_url = route.request.url
                     if any(
                         ext in req_url.lower()
-                        for ext in [".mp4", ".webm", ".m3u8", ".ts", ".mov"]
+                        for ext in [".mp4", ".webm", ".m3u8", ".ts", ".mov", ".mpd"]
                     ):
                         if req_url not in video_requests:
                             logging.debug(f"INTERCEPT - Video URL: {req_url}")
                             video_requests.append(req_url)
                     await route.continue_()
                 except Exception as e:
-                    if "Target page, context or browser has been closed" in str(e):
-                        logging.info("Route skipped after page closed.")
-                    else:
-                        logging.info(f"ROUTE ERROR - {e}")
+                    if "closed" not in str(e):
+                        logging.warning(f"INTERCEPT ERROR - {e}")
 
             try:
                 context = await browser.new_context(
@@ -718,14 +716,25 @@ async def fetch_rendered_html_playwright(
                         """window.alert = () => {}; window.confirm = () => true;""",
                     )
                     await page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                    html = await page.content()
                 except Exception as e:
                     logging.info(f"NAVIGATION ERROR - {url}: {e}")
                     return "", []
 
                 try:
                     await page.locator("video source").first.wait_for(timeout=8000)
-                except:
-                    logging.info("No <source> tag found.")
+                except Exception:
+                    logging.info("No <video><source> found, proceeding anyway.")
+
+                await safe_evaluate(
+                    page,
+                    """() => {
+                        const fallbackClick = document.querySelector('video, .video-player, [data-video], .play-btn, .player');
+                        if (fallbackClick) {
+                            try { fallbackClick.click(); } catch (e) {}
+                        }
+                    }""",
+                )
 
                 await safe_evaluate(
                     page,
@@ -786,7 +795,7 @@ async def fetch_rendered_html_playwright(
         for attempt in range(retries + 1):
             try:
                 html, video_urls = await _internal_fetch_with_playwright(
-                    url, timeout, browser
+                    url, timeout + attempt * 15000, browser
                 )
                 if html and html.strip():
                     return html, video_urls
@@ -843,32 +852,30 @@ async def auto_bypass_consent_dialog(page):
     try:
         await page.wait_for_timeout(150)
         selectors = [
+            '[id*="consent"]',
+            '[class*="consent"]',
             "text=Enter",
             "text=I Agree",
             "text=Continue",
             "text=Yes",
             "text=Proceed",
+            "text=I am 18+",
             "button:has-text('Enter')",
             "button:has-text('Continue')",
             "button:has-text('Accept')",
             "button:has-text('OK')",
             "button:has-text('Got it')",
             "button:has-text('Agree')",
-            "text=I am 18+",
-            "text=Enter site",
             "button:has-text('Enter site')",
         ]
         for selector in selectors:
-            element = await page.query_selector(selector)
-            if element:
-                try:
-                    if await element.is_visible():
-                        await element.click(force=True)
-                        await page.wait_for_timeout(300)
-                        break
-                except Exception as e:
-                    if "not visible" not in str(e):
-                        logging.error(f"CONSENT ERROR - {e}")
+            try:
+                element = await page.query_selector(selector)
+                if element and await element.is_visible():
+                    await element.click(force=True)
+                    await page.wait_for_timeout(300)
+            except Exception as e:
+                logging.warning(f"AUTO CONSENT ERROR - {selector}: {e}")
     except Exception as e:
         logging.error(f"CONSENT ERROR - {e}")
 
@@ -900,6 +907,11 @@ async def extract_metadata(html, url):
             doc = Document(html)
             title = doc.short_title()
         except:
+            title = urlparse(url).netloc
+
+    if not title.strip():
+        title = os.path.basename(urlparse(url).path).replace("-", " ").replace("_", " ")
+        if not title:
             title = urlparse(url).netloc
 
     return {
