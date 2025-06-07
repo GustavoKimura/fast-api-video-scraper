@@ -21,6 +21,7 @@ from typing import List, Tuple
 # === 🔒 DOMAIN CONCURRENCY CONTROL ===
 domain_counters = defaultdict(lambda: asyncio.Semaphore(4))
 
+
 # === ⚙️ CONFIGURATION ===
 def max_throughput_config():
     cores = os.cpu_count() or 4
@@ -64,19 +65,6 @@ BLOCKED_DOMAINS = {
     "bloomberg.com",
     "marketwatch.com",
 }
-
-BLOCKED_KEYWORDS = [
-    "quora",
-    "board",
-    "discussion",
-    "signup",
-    "login",
-    "register",
-    "comment",
-    "thread",
-    "showthread",
-    "archive",
-]
 
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
@@ -163,8 +151,6 @@ def is_valid_link(url):
     if not url.startswith(("http://", "https://")):
         return False
     if any(c in url for c in ['"', "'", "\\", " "]):
-        return False
-    if any(kw in url.lower() for kw in BLOCKED_KEYWORDS):
         return False
     if url.split("?")[0].split("#")[0].split(".")[-1] in [
         "pdf",
