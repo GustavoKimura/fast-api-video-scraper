@@ -592,7 +592,7 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
             try:
                 await stealth_async(page)
             except Exception as e:
-                print(f"[PLAYWRIGHT WARNING] Failed to apply stealth: {e}")
+                print(f"[PLAYWRIGHT WARNING] Stealth failed: {e}")
 
             try:
                 await page.goto(url, timeout=timeout)
@@ -602,119 +602,80 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                 return ""
 
             try:
-                await page.wait_for_selector("video source[src]", timeout=8000)
+                await page.locator("video source").first.wait_for(timeout=8000)
             except:
                 print("[INFO] No <source> tag found directly.")
 
-            video_src = await page.evaluate(
-                """
-                () => {
-                    const sources = document.querySelectorAll("video source[src]");
-                    if (sources.length > 0) return sources[0].src;
+            try:
+                video_src = await page.evaluate(
+                    """() => {
+                    try {
+                        const sources = document.querySelectorAll("video source[src]");
+                        if (sources.length > 0) return sources[0].src;
 
-                    const scripts = Array.from(document.scripts).map(s => s.textContent).join("\n");
-                    const match = scripts.match(/"file"\s*:\s*"([^"]+\.(mp4|webm|m3u8))"/i);
-                    return match ? match[1] : null;
-                }
-                """
-            )
-            if video_src:
-                await page.evaluate(
-                    f"""
-                    let v = document.createElement('video');
-                    let s = document.createElement('source');
-                    s.src = "{video_src}";
-                    v.appendChild(s);
-                    document.body.appendChild(v);
-                    """
+                        const scripts = Array.from(document.scripts).map(s => s.textContent).join("\\n");
+                        const match = scripts.match(/"file"\\s*:\\s*"([^"]+\\.(mp4|webm|m3u8))"/i);
+                        return match ? match[1] : null;
+                    } catch (e) {
+                        return null;
+                    }
+                }"""
                 )
-                print(f"[JS VIDEO SRC] Injected src: {video_src}")
+                if video_src:
+                    await page.evaluate(
+                        """(videoSrc) => {
+                        try {
+                            const v = document.createElement('video');
+                            const s = document.createElement('source');
+                            s.src = videoSrc;
+                            v.appendChild(s);
+                            document.body.appendChild(v);
+                        } catch (e) {
+                            console.error(e);
+                        }
+                    }""",
+                        video_src,
+                    )
+                    print(f"[JS VIDEO SRC] Injected src: {video_src}")
+            except Exception as e:
+                print(f"[VIDEO JS ERROR] {e}")
 
             try:
                 await page.evaluate(
-                    """
+                    """() => {
                     document.querySelectorAll('button, .play, .video-play, .btn-play, .vjs-big-play-button, .player-button')
                     .forEach(el => { try { el.click(); } catch (e) {} });
-                    """
+                }"""
                 )
                 await page.wait_for_timeout(1500)
             except Exception as e:
                 print(f"[CLICK SIMULATION ERROR] {e}")
 
             for _ in range(3):
-                await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(800)
+                try:
+                    await page.evaluate(
+                        "window.scrollBy(0, document.body.scrollHeight)"
+                    )
+                    await page.wait_for_timeout(800)
+                except Exception:
+                    break
 
             await auto_bypass_consent_dialog(page)
 
             for v_url in set(video_requests):
-                await page.evaluate(
-                    f"""
-                    let v = document.createElement('video');
-                    let s = document.createElement('source');
-                    s.src = "{v_url}";
-                    v.appendChild(s);
-                    document.body.appendChild(v);
-                    """
-                )
-
-            processed_iframe_urls = set()
-
-            for frame in page.frames:
-                if frame == page.main_frame:
-                    continue
-
                 try:
-                    frame_url = frame.url
-                    if "about:blank" in frame_url or frame_url in processed_iframe_urls:
-                        continue
-
-                    processed_iframe_urls.add(frame_url)
-
-                    try:
-                        frame_html = await frame.content()
-                    except:
-                        frame_html = ""
-
-                    if not frame_html.strip():
-                        print(
-                            f"[IFRAME - CROSS DOMAIN] Attempting direct scrape: {frame_url}"
-                        )
-                        try:
-                            alt_html = await _internal_fetch_with_playwright(
-                                frame_url, timeout // 2
-                            )
-                            if alt_html:
-                                video_frame_srcs = extract_video_sources(
-                                    alt_html, frame_url
-                                )
-                                for v_url in video_frame_srcs:
-                                    await page.evaluate(
-                                        f"""
-                                        let v = document.createElement('video');
-                                        let s = document.createElement('source');
-                                        s.src = "{v_url}";
-                                        v.appendChild(s);
-                                        document.body.appendChild(v);
-                                    """
-                                    )
-                        except Exception as e:
-                            print(f"[IFRAME ERROR - REFETCH] {frame_url}: {e}")
-                        continue
-
-                    video_frame_srcs = extract_video_sources(frame_html, frame_url)
-                    for v_url in video_frame_srcs:
-                        await page.evaluate(
-                            f"""
-                            let v = document.createElement('video');
-                            let s = document.createElement('source');
-                            s.src = "{v_url}";
-                            v.appendChild(s);
-                            document.body.appendChild(v);
-                        """
-                        )
+                    await page.evaluate(
+                        """(vUrl) => {
+                        const v = document.createElement('video');
+                        const s = document.createElement('source');
+                        s.src = vUrl;
+                        v.appendChild(s);
+                        document.body.appendChild(v);
+                    }""",
+                        v_url,
+                    )
                 except Exception as e:
-                    print(f"[IFRAME ERROR] {frame.url}: {e}")
+                    print(f"[VIDEO INJECT ERROR] {e}")
 
             return await page.content()
 
