@@ -669,7 +669,6 @@ async def search_videos_async(query):
         print(f"[WORKER] Starting worker for: {url} (domain: {domain})")
         async with sem, domain_counters[domain]:
             try:
-                print(f"[WORKER] Calling extract_video_metadata for: {url}")
                 result = await asyncio.wait_for(
                     extract_video_metadata(url, query_embed), timeout=60
                 )
