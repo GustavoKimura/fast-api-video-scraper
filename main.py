@@ -151,10 +151,12 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=1800):
 
     final = []
     for r in results:
-        if r.get("duration"):
-            dur_secs = duration_to_seconds(r["duration"])
-            if not (min_duration <= dur_secs <= max_duration):
-                continue
+        if not r.get("duration"):
+            continue
+
+        dur_secs = duration_to_seconds(r["duration"])
+        if not (min_duration <= dur_secs <= max_duration):
+            continue
 
         score = 0.0
         if r.get("tags"):
@@ -761,11 +763,14 @@ async def search_videos_async(query):
                 result = await asyncio.wait_for(
                     extract_video_metadata(url, query_embed), timeout=60
                 )
-                print(f"[WORKER] extract_video_metadata completed for: {url}")
 
-                if not result:
-                    print(f"[WORKER] No result for: {url}")
+                if not result or not result.get("video_links"):
+                    print(f"[WORKER] No usable result for: {url}")
                     return None
+
+                processed.add(url)
+                print(f"[WORKER] Completed: {url}")
+                return result
 
             except asyncio.TimeoutError:
                 print(f"[WORKER TIMEOUT] {url}")
@@ -803,7 +808,6 @@ async def search_videos_async(query):
         while i < len(all_links) and len(tasks) < MAX_PARALLEL_TASKS:
             url = all_links[i]
             if url not in processed:
-                processed.add(url)
                 tasks.append(asyncio.create_task(worker(url)))
             else:
                 print(f"[TASK] URL already processed: {url}")
