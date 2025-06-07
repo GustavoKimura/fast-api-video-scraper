@@ -70,15 +70,6 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Local
-*.log
-results.json
-results.md
-*.lnk
-searxng/*
-!/searxng/docker-compose.yml
-!/searxng/settings.yml
-
 # OS files
 .DS_Store
 Thumbs.db
