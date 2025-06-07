@@ -138,8 +138,9 @@ def cosine_sim(a, b):
     return float(dot(a, b) / (norm(a) * norm(b) + 1e-8))
 
 
-def rank_by_similarity(results, query_embed, min_duration=30, max_duration=1800):
-    query_tags = set(extract_tags(query_embed))
+def rank_by_similarity(results, query, min_duration=30, max_duration=1800):
+    query_embed = model_embed.encode(query)
+    query_tags = {kw for kw, _ in extract_tags(query)}
     tag_boosts = boost_by_tag_cooccurrence(results)
     seen_domains = set()
 
@@ -155,7 +156,13 @@ def rank_by_similarity(results, query_embed, min_duration=30, max_duration=1800)
             tag_text = " ".join(r["tags"])
             tag_embed = model_embed.encode(tag_text)
             sim = cosine_sim(query_embed, tag_embed)
-            overlap = len(query_tags.intersection(set(r["tags"])))
+            result_tags = {
+                re.sub(r"[^a-z0-9]", "", tag.lower()) for tag in r.get("tags", [])
+            }
+            query_tags_norm = {
+                re.sub(r"[^a-z0-9]", "", tag.lower()) for tag in query_tags
+            }
+            overlap = len(query_tags_norm & result_tags)
             boost = sum(tag_boosts.get(tag, 0) for tag in r["tags"])
             score = sim + 0.05 * overlap + boost
 
@@ -665,7 +672,7 @@ async def search(query: str = "", power_scraping: bool = False):
     else:
         results = [r for r in results if r.get("video_links")]
 
-    results = rank_by_similarity(results, model_embed.encode(query))
+    results = rank_by_similarity(results, query)
 
     return JSONResponse(
         content=[
