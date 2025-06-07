@@ -628,16 +628,40 @@ def extract_video_sources(html, base_url):
             full_url = urljoin(base_url, str(src))
             sources.add(full_url)
 
-    for script in soup.find_all("script", type="application/ld+json"):
+    for script in soup.find_all("script"):
         try:
-            if not isinstance(script, Tag) or not isinstance(script.string, str):
+            if not isinstance(script, Tag) or not script.string:
                 continue
-            data = json.loads(script.string)
-            if isinstance(data, dict) and data.get("@type") == "VideoObject":
-                url = data.get("contentUrl") or data.get("embedUrl")
-                if url and re.search(r"\.(mp4|webm|m3u8|mov)", url):
-                    sources.add(url)
-        except Exception:
+
+            jw_match = re.search(
+                r'jwplayer\(["\'].*?["\']\)\.setup\(\{.*?file\s*:\s*["\'](https?[^"\']+\.(?:mp4|webm|m3u8|mov))["\']',
+                script.string,
+                re.DOTALL,
+            )
+            if jw_match:
+                sources.add(jw_match.group(1))
+
+            file_matches = re.findall(
+                r'["\']file["\']\s*:\s*["\'](https?://[^\s\'"]+\.(?:mp4|webm|m3u8|mov))["\']',
+                script.string,
+            )
+            for match in file_matches:
+                sources.add(match)
+
+            list_matches = re.findall(
+                r'["\']sources["\']\s*:\s*\[(.*?)\]',
+                script.string,
+                re.DOTALL,
+            )
+            for group in list_matches:
+                nested_files = re.findall(
+                    r'["\']file["\']\s*:\s*["\'](https?://[^\s\'"]+\.(?:mp4|webm|m3u8|mov))["\']',
+                    group,
+                )
+                sources.update(nested_files)
+
+        except Exception as e:
+            print(f"[SCRIPT PARSE ERROR] {e}")
             continue
 
         try:
