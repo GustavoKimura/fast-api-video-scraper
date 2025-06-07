@@ -392,7 +392,6 @@ def extract_video_sources(html, base_url):
             if re.search(r"\.(mp4|webm|m3u8|mov)", full_url):
                 sources.add(full_url)
 
-    # Iframe embedded players
     for iframe in soup.find_all("iframe", src=True):
         if not isinstance(iframe, Tag):
             continue
@@ -404,7 +403,6 @@ def extract_video_sources(html, base_url):
         ):
             sources.add(urljoin(base_url, str(src)))
 
-    # Common lazy-loaded attributes
     for tag in soup.find_all(attrs={"data-src": True}):
         if not isinstance(tag, Tag):
             continue
@@ -584,7 +582,7 @@ async def search(query: str = "", power_scraping: bool = False):
             {
                 "title": r["title"] or r["url"],
                 "summary": r["summary"],
-                "videos": r.get("video_links", []),
+                "video_links": r.get("video_links", []),
                 "tags": r.get("tags", []),
             }
             for r in results
