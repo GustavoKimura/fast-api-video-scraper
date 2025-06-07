@@ -250,7 +250,7 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             tag_embed = model_embed.encode_cached(tag_text)
             sim = cosine_sim(query_embed, tag_embed)
             result_tags = normalize_tags(r.get("tags", []))
-            if not isinstance(result_tags, str) or not result_tags.strip():
+            if not result_tags:
                 continue
             query_tags_norm = normalize_tags(list(query_tags))
             overlap = len(query_tags_norm & result_tags)
@@ -268,9 +268,6 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             score = cosine_sim(query_embed, title_embed) * 0.6
 
         r["score"] = score - score_penalty
-
-        if "score" not in r:
-            r["score"] = 0.0
 
         final.append(r)
 
@@ -457,7 +454,7 @@ def extract_tags(text: str, top_n: int = 10):
     if (
         raw_results
         and isinstance(raw_results, list)
-        and isinstance(raw_results[0], list)
+        and all(isinstance(sub, list) for sub in raw_results)
     ):
         flat: List[Tuple[str, float]] = []
         for sublist in raw_results:
@@ -487,8 +484,6 @@ def boost_by_tag_cooccurrence(results):
     for r in results:
         tags_raw = r.get("tags", [])
         if not tags_raw:
-            if not isinstance(tag, str) or not tag.strip():
-                continue
             fallback_tags = auto_generate_tags_from_text(
                 r.get("title", "") + " " + r.get("url", "")
             )
@@ -497,6 +492,8 @@ def boost_by_tag_cooccurrence(results):
 
         canonical_tags = []
         for tag in tags_raw:
+            if not isinstance(tag, str) or not tag.strip():
+                continue
             norm = normalize_tag(str(tag))
             can = canonical_tag(norm)
             seen_tag_sets[norm] = can
@@ -572,7 +569,7 @@ def clean_tag_text(tag):
 
 def normalize_tag(tag: str):
     tag = clean_tag_text(re.sub(r"[^a-z0-9]", "", tag.lower()))
-    tag = re.sub(r"\b(consent|cookie|agree|enter|age|18(?:\+)?(?:only)?)\b", "", tag)
+    tag = re.sub(r"\b(consent|cookie|agree|age|18(?:\+)?(?:only)?)\b", "", tag)
     return tag.strip()
 
 
@@ -770,11 +767,11 @@ async def fetch_rendered_html_playwright(
             finally:
                 await asyncio.sleep(2 * (attempt + 1))
 
-        if "browser" in locals() and browser:
-            try:
+        try:
+            if browser:
                 await browser.close()
-            except Exception as e:
-                print(f"[BROWSER CLOSE ERROR] {e}")
+        except Exception as e:
+            print(f"[BROWSER CLOSE ERROR] {e}")
 
     return "", []
 
@@ -816,7 +813,7 @@ def extract_content(html):
 
 async def auto_bypass_consent_dialog(page):
     try:
-        await page.wait_for_timeout(300)
+        await page.wait_for_timeout(150)
         selectors = [
             "text=Enter",
             "text=I Agree",
@@ -839,7 +836,7 @@ async def auto_bypass_consent_dialog(page):
                 try:
                     if await element.is_visible():
                         await element.click(force=True)
-                        await page.wait_for_timeout(1000)
+                        await page.wait_for_timeout(300)
                         break
                 except Exception as e:
                     if "not visible" not in str(e):
@@ -1052,7 +1049,7 @@ async def extract_video_metadata(url, query_embed, power_scraping):
         return None
 
     html, video_links = await fetch_rendered_html_playwright(url)
-    if not video_links:
+    if not html or not html.strip():
         print(f"[ERROR] No HTML content fetched from {url}")
         return None
 
