@@ -39,6 +39,9 @@ logging.basicConfig(level=logging.DEBUG, format=formatter_str)
 for handler in logging.getLogger().handlers:
     handler.setFormatter(ElapsedFormatter(formatter_str))
 
+for lib in ["trafilatura", "boilerpy3", "readability", "urllib3"]:
+    logging.getLogger(lib).setLevel(logging.WARNING)
+
 # === 🧾 EXECUTOR ===
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=(os.cpu_count() or 4) * 2)
 
