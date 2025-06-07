@@ -21,7 +21,6 @@ from typing import List, Tuple
 # === 🔒 DOMAIN CONCURRENCY CONTROL ===
 domain_counters = defaultdict(lambda: asyncio.Semaphore(4))
 
-
 # === ⚙️ CONFIGURATION ===
 def max_throughput_config():
     cores = os.cpu_count() or 4
@@ -38,7 +37,7 @@ SUMMARIES = 5
 DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 content_extractor = extractors.LargestContentExtractor()
-
+MAX_PARALLEL_TASKS = int(os.getenv("SCRAPER_PARALLELISM", (os.cpu_count() or 4) * 2))
 SEARXNG_BASE_URL = "http://searxng:8080/search"
 
 USER_AGENTS = [
@@ -468,7 +467,7 @@ async def process_url_async(url, query_embed):
     return result
 
 
-async def search_engine_async(query):
+async def search_engine_async(query, link_count):
     payload = {"q": query, "format": "json", "language": "en"}
     async with aiohttp.ClientSession(timeout=timeout_obj) as session:
         async with session.post(
@@ -481,7 +480,7 @@ async def search_engine_async(query):
                 r.get("url")
                 for r in data.get("results", [])
                 if is_valid_link(r.get("url"))
-            ][:LINKS_TO_SCRAP]
+            ][:link_count]
 
 
 async def advanced_search_async(query):
@@ -502,12 +501,12 @@ async def advanced_search_async(query):
     i, tasks = 0, []
     max_time = 25
     start_time = time.monotonic()
-    while len(results) < LINKS_TO_SCRAP:
+    while len(results) < SUMMARIES:
         if time.monotonic() - start_time > max_time:
             break
 
         if i >= len(all_links):
-            links = await search_engine_async(query)
+            links = await search_engine_async(query, LINKS_TO_SCRAP)
             new_links = [u for u in links if u not in collected]
             if not new_links:
                 break
@@ -554,10 +553,6 @@ def index():
     return open("index.html", encoding="utf-8").read()
 
 
-from fastapi.responses import StreamingResponse
-import json
-
-
 @app.get("/search")
 async def search(query: str = "", power_scraping: bool = False):
     global LINKS_TO_SCRAP, SUMMARIES
@@ -570,51 +565,23 @@ async def search(query: str = "", power_scraping: bool = False):
         LINKS_TO_SCRAP = 10
         SUMMARIES = 5
 
-    query_embed = model_embed.encode(query)
-    all_links, processed = [], set()
-    collected = []
-    sem = asyncio.Semaphore(MAX_PARALLEL_TASKS)
+    results = await advanced_search_async(query)
 
-    async def worker(url):
-        domain = get_main_domain(url)
-        async with sem, domain_counters[domain]:
-            try:
-                return await asyncio.wait_for(
-                    process_url_async(url, query_embed), timeout=12
-                )
-            except:
-                return None
+    if not any(r.get("video_links") for r in results):
+        results = results[:5]
+    else:
+        results = [r for r in results if r.get("video_links")]
 
-    async def streamer():
-        nonlocal collected, all_links
-        i = 0
-        start_time = time.monotonic()
+    results = rank_by_similarity(results, model_embed.encode(query))
 
-        while len(collected) < LINKS_TO_SCRAP and (time.monotonic() - start_time) < 25:
-            if i >= len(all_links):
-                links = await search_engine_async(query)
-                all_links += [u for u in links if u not in processed]
-
-            batch = []
-            while i < len(all_links) and len(batch) < MAX_PARALLEL_TASKS:
-                url = all_links[i]
-                if url not in processed:
-                    processed.add(url)
-                    batch.append(asyncio.create_task(worker(url)))
-                i += 1
-
-            if batch:
-                done, _ = await asyncio.wait(batch, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    try:
-                        result = task.result()
-                        if result and result.get("video_links"):
-                            collected.append(result)
-                            progress = int(100 * len(collected) / LINKS_TO_SCRAP)
-                            yield f"data: {json.dumps({'progress': progress, 'result': result})}\n\n"
-                    except:
-                        continue
-
-        yield f"data: {json.dumps({'done': True})}\n\n"
-
-    return StreamingResponse(streamer(), media_type="text/event-stream")
+    return JSONResponse(
+        content=[
+            {
+                "title": r["title"] or r["url"],
+                "summary": r["summary"],
+                "videos": r.get("video_links", []),
+                "tags": r.get("tags", []),
+            }
+            for r in results
+        ]
+    )

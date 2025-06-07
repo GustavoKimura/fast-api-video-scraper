@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" x-data="searchApp()" x-init="init()">
+<html lang="en" x-data="searchApp()">
   <head>
     <meta charset="UTF-8" />
     <title>Video Search</title>
@@ -92,8 +92,9 @@
         display: none !important;
       }
 
-      /* Loading */
-      .loading {
+      /* Loading and Error */
+      .loading,
+      .error {
         text-align: center;
         margin: 1rem 0;
         font-style: italic;
@@ -151,22 +152,6 @@
         word-break: break-word;
       }
 
-      .progress-container {
-        width: 100%;
-        max-width: 600px;
-        height: 8px;
-        background: #222;
-        border-radius: 8px;
-        overflow: hidden;
-        margin: 0.5rem auto 1.5rem;
-      }
-
-      .progress-bar {
-        height: 100%;
-        background: #5ab4f0;
-        transition: width 0.2s ease;
-      }
-
       /* Responsive grid columns */
       @media (min-width: 600px) {
         .grid {
@@ -190,35 +175,25 @@
         aria-label="Search videos"
         required
         autocomplete="off"
-        :disabled="loading"
       />
 
       <label style="color: #ccc; font-size: 0.9rem">
-        <input type="checkbox" x-model="powerScraping" :disabled="loading" />
+        <input type="checkbox" x-model="powerScraping" />
         Activate Power scraping? 🔥
       </label>
 
-      <button type="submit" :disabled="loading">
-        <span x-text="loading ? 'Searching…' : 'Search'"></span>
-      </button>
-
-      <button
-        type="button"
-        x-show="loading"
-        @click="abort"
-        style="background: #aa4444; color: #fff"
-      >
-        Cancel
-      </button>
+      <button type="submit">Search</button>
     </form>
-
-    <div class="progress-container" x-show="loading" x-cloak>
-      <div class="progress-bar" :style="{ width: progress + '%' }"></div>
-    </div>
 
     <template x-if="loading">
       <div class="loading" role="status" aria-live="polite">
         Loading results...
+      </div>
+    </template>
+
+    <template x-if="error">
+      <div class="error" role="status" aria-live="polite">
+        Error searching videos...
       </div>
     </template>
 
@@ -228,13 +203,14 @@
         :key="item.source_url || item.title || index"
       >
         <article class="card" tabindex="0" aria-label="Search result item">
-          <template x-if="item.videos && item.videos.length > 0">
-            <template x-for="videoUrl in item.videos" :key="videoUrl">
+          <template x-if="item.video_links && item.video_links.length > 0">
+            <template x-for="videoUrl in item.video_links" :key="videoUrl">
               <video
                 :src="videoUrl"
                 controls
-                preload="metadata"
+                preload="none"
                 playsinline
+                muted
               ></video>
             </template>
           </template>
@@ -251,79 +227,30 @@
           powerScraping: false,
           results: [],
           loading: false,
-          progress: 0,
-          eventSource: null,
-
+          error: false,
+          init() {},
           async search() {
             if (!this.query.trim()) {
               this.results = [];
               return;
             }
-
             this.loading = true;
-            this.progress = 0;
+            this.error = false;
             this.results = [];
-
-            this.eventSource = new EventSource(
-              `/search?query=${encodeURIComponent(this.query)}&power_scraping=${
-                this.powerScraping
-              }`
-            );
-
-            const timeoutId = setTimeout(() => {
-              if (this.loading && this.progress < 100) {
-                console.warn("Progress timeout hit");
-                this.loading = false;
-                this.progress = 100;
-                this.eventSource.close();
-              }
-            }, 30000);
-
-            this.eventSource.onmessage = (event) => {
-              try {
-                const data = JSON.parse(event.data);
-
-                if (data.done) {
-                  clearTimeout(timeoutId);
-                  this.loading = false;
-                  this.progress = 100;
-                  this.eventSource.close();
-                  return;
-                }
-
-                if (data.progress) {
-                  this.progress = data.progress;
-                }
-
-                if (data.result) {
-                  this.results.push({
-                    title: data.result.title || data.result.url,
-                    summary: data.result.summary,
-                    videos: data.result.video_links,
-                    tags: data.result.tags,
-                  });
-                }
-              } catch (e) {
-                console.error("SSE parsing error:", e);
-              }
-            };
-
-            this.eventSource.onerror = () => {
-              console.error("SSE connection error");
-              clearTimeout(timeoutId);
+            try {
+              const res = await fetch(
+                `/search?query=${encodeURIComponent(
+                  this.query
+                )}&power_scraping=${this.powerScraping}`
+              );
+              const data = await res.json();
+              this.results = data;
+            } catch (e) {
+              console.error("Search failed", e);
+              this.error = true;
+            } finally {
               this.loading = false;
-              this.progress = 0;
-              this.eventSource.close();
-            };
-          },
-
-          abort() {
-            if (this.eventSource) {
-              this.eventSource.close();
-              this.eventSource = null;
             }
-            this.loading = false;
-            this.progress = 0;
           },
         };
       }
