@@ -1,5 +1,5 @@
 # === 📦 IMPORTS ===
-import os, random, hashlib, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json
+import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura
 from urllib.parse import urlparse, urlunparse, urljoin
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -112,7 +112,7 @@ model_embed = OpenCLIPEmbedder(model_name="ViT-B-32", pretrained="laion2b_s34b_b
 kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
 
 
-def expand_query_semantically(query: str, top_n: int = 5) -> List[str]:
+def expand_query_semantically(query: str, top_n: int = 5):
     raw_keywords = kw_model.extract_keywords(
         query,
         keyphrase_ngram_range=(1, 3),
@@ -167,7 +167,7 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=1800):
                 re.sub(r"[^a-z0-9]", "", tag.lower()) for tag in r.get("tags", [])
             }
             query_tags_norm = {
-                re.sub(r"[^a-z0-9]", "", tag.lower()) for tag in query_tags
+                re.sub(r"[^a-z0-9]", "", tag.lower()) for tag, _ in query_tags
             }
             overlap = len(query_tags_norm & result_tags)
             boost = sum(tag_boosts.get(tag, 0) for tag in r["tags"])
@@ -268,7 +268,7 @@ def duration_to_seconds(duration_str: str):
         return 0
 
 
-def extract_tags(text: str, top_n: int = 10) -> List[Tuple[str, float]]:
+def extract_tags(text: str, top_n: int = 10):
     clean = re.sub(r"[^a-zA-Z0-9\s]", "", text).lower()
 
     raw_results = kw_model.extract_keywords(
@@ -308,50 +308,11 @@ def boost_by_tag_cooccurrence(results):
     return tag_boosts
 
 
-def is_probable_video_url(url: str) -> bool:
+def is_probable_video_url(url: str):
     video_exts = (".mp4", ".webm", ".m3u8", ".mov")
     parsed = urlparse(url)
     path = parsed.path.lower()
     return any(path.endswith(ext) for ext in video_exts)
-
-
-def safe_filename(url: str, with_timestamp: bool = True) -> str:
-    import datetime
-
-    name = re.sub(r"[^\w\-_.]", "_", url)
-    if with_timestamp:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        name += f"_{timestamp}"
-    return name[:150]
-
-
-async def auto_bypass_consent_dialog(page):
-    try:
-        await page.wait_for_timeout(1000)
-
-        selectors = [
-            "text=Enter",
-            "text=I Agree",
-            "text=Continue",
-            "text=Yes",
-            "text=Proceed",
-            "button:has-text('Enter')",
-            "button:has-text('Continue')",
-            "button:has-text('Accept')",
-            "button:has-text('OK')",
-            "button:has-text('Got it')",
-            "button:has-text('Agree')",
-        ]
-
-        for selector in selectors:
-            element = await page.query_selector(selector)
-            if element:
-                print(f"[CONSENT] Clicking selector: {selector}")
-                await element.click(force=True)
-                await page.wait_for_timeout(1000)
-                break
-    except Exception as e:
-        print(f"[CONSENT ERROR] {e}")
 
 
 # === 🌐 RENDER + EXTRACT ===
@@ -449,8 +410,33 @@ def extract_content(html):
         return ""
 
 
-def safe_strip(v):
-    return v.strip() if isinstance(v, str) else ""
+async def auto_bypass_consent_dialog(page):
+    try:
+        await page.wait_for_timeout(1000)
+
+        selectors = [
+            "text=Enter",
+            "text=I Agree",
+            "text=Continue",
+            "text=Yes",
+            "text=Proceed",
+            "button:has-text('Enter')",
+            "button:has-text('Continue')",
+            "button:has-text('Accept')",
+            "button:has-text('OK')",
+            "button:has-text('Got it')",
+            "button:has-text('Agree')",
+        ]
+
+        for selector in selectors:
+            element = await page.query_selector(selector)
+            if element:
+                print(f"[CONSENT] Clicking selector: {selector}")
+                await element.click(force=True)
+                await page.wait_for_timeout(1000)
+                break
+    except Exception as e:
+        print(f"[CONSENT ERROR] {e}")
 
 
 async def extract_metadata(html):
@@ -493,7 +479,7 @@ def auto_generate_tags_from_text(text, top_k=5):
     ]
 
 
-def extract_video_candidate_links(html: str, base_url: str) -> list[str]:
+def extract_video_candidate_links(html: str, base_url: str):
     soup = BeautifulSoup(html, "lxml")
     urls = set()
 
