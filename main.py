@@ -53,7 +53,7 @@ ffprobe_sem = asyncio.Semaphore(get_ffprobe_concurrency())
 def dynamic_parallel_task_limit():
     cores = os.cpu_count() or 4
     ram_gb = psutil.virtual_memory().total // 1_073_741_824
-    multiplier = 12 if ram_gb >= 16 else 8
+    multiplier = 16 if ram_gb >= 16 else 12
     return min(cores * multiplier, 512)
 
 
