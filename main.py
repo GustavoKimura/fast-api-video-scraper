@@ -548,7 +548,7 @@ async def deduplicate_videos(videos: list[dict]) -> list[dict]:
 
 
 # === 🌐 RENDER + EXTRACT ===
-async def fetch_rendered_html_playwright(url, timeout=150000, retries=2):
+async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
     async def _internal_fetch_with_playwright(url, timeout):
         browser = None
 
@@ -576,6 +576,7 @@ async def fetch_rendered_html_playwright(url, timeout=150000, retries=2):
             )
 
             page = await context.new_page()
+            page.set_default_navigation_timeout(timeout)
 
             try:
                 await stealth_async(page)
@@ -584,7 +585,7 @@ async def fetch_rendered_html_playwright(url, timeout=150000, retries=2):
 
             try:
                 await page.goto(url, timeout=timeout)
-                await page.wait_for_load_state("domcontentloaded")
+                await page.wait_for_load_state("domcontentloaded", timeout=timeout)
 
                 for _ in range(3):
                     await page.evaluate(
@@ -1008,7 +1009,7 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
     query_embed = model_embed.encode(query)
     all_links, results, processed = [], [], set()
     collected = set()
-    sem = asyncio.Semaphore(dynamic_parallel_task_limit())
+    sem = asyncio.Semaphore(min(MAX_PARALLEL_TASKS, 8))
 
     async def worker(url):
         domain = get_main_domain(url)
@@ -1016,7 +1017,7 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
         async with sem, domain_counters[domain]:
             try:
                 result = await asyncio.wait_for(
-                    extract_video_metadata(url, query_embed), timeout=120
+                    extract_video_metadata(url, query_embed), timeout=240
                 )
                 if not result or not result.get("videos"):
                     print(f"[WORKER] No usable result for: {url}")
@@ -1032,7 +1033,7 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
                 return None
 
     i, tasks = 0, []
-    max_time = 90
+    max_time = 180
     start_time = time.monotonic()
 
     while video_count < max_videos:
@@ -1151,7 +1152,7 @@ async def search(query: str = "", power_scraping: bool = False):
 
     try:
         results = await asyncio.wait_for(
-            search_videos_async(query, videos_to_return), timeout=120
+            search_videos_async(query, videos_to_return), timeout=180
         )
     except asyncio.TimeoutError:
         print(f"[TIMEOUT] Search query timed out: {query}")
