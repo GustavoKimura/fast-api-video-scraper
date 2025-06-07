@@ -895,9 +895,9 @@ async def search_engine_async(query, link_count):
             ][:link_count]
 
 
-async def search_videos_async(query="4k videos", videos_to_search: int = 1):
+async def search_videos_async(query="4k videos", videos_to_return: int = 1):
     video_count = 0
-    max_videos = videos_to_search
+    max_videos = videos_to_return
 
     expanded_queries = list(dict.fromkeys(expand_query_semantically(query)))
     print(f"[DEBUG] Expanded queries: {expanded_queries}")
@@ -941,7 +941,7 @@ async def search_videos_async(query="4k videos", videos_to_search: int = 1):
         if i >= len(all_links):
             print("[LOOP] Fetching more links for expanded queries...")
 
-            needed = videos_to_search - len(results)
+            needed = videos_to_return - len(results)
             cores = os.cpu_count() or 4
             ram_gb = psutil.virtual_memory().total // 1_073_741_824
             base_multiplier = 1 + (cores // 4) + (ram_gb // 8)
@@ -1033,9 +1033,10 @@ def index():
 @app.get("/search")
 async def search(query: str = "", power_scraping: bool = False):
     print("=== STARTING SEARCH ===")
+    videos_to_return = min((os.cpu_count() or 4) * 10, 500) if power_scraping else 1
     results = await search_videos_async(
         query,
-        videos_to_search=min((os.cpu_count() or 4) * 10, 500) if power_scraping else 1,
+        videos_to_return,
     )
     print(f"[RESULTS] Total results fetched: {len(results)}")
 
@@ -1053,9 +1054,9 @@ async def search(query: str = "", power_scraping: bool = False):
             video["source_title"] = result["title"]
             all_videos.append(video)
 
-    ranked_videos = rank_by_similarity(await deduplicate_videos(all_videos), query)
-    if not power_scraping:
-        ranked_videos = ranked_videos[:1]
+    ranked_videos = rank_by_similarity(await deduplicate_videos(all_videos), query)[
+        :videos_to_return
+    ]
 
     ranked_results = {}
     for video in ranked_videos:
