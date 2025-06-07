@@ -21,19 +21,33 @@ from difflib import SequenceMatcher
 
 
 # === 🔒 DOMAIN CONCURRENCY CONTROL ===
-domain_counters = defaultdict(lambda: asyncio.Semaphore(4))
+def get_domain_concurrency():
+    cores = os.cpu_count() or 4
+    ram_gb = psutil.virtual_memory().total // 1_073_741_824
+
+    base = max(2, min((cores // 2), 10))
+
+    if ram_gb >= 16:
+        base += 2
+    elif ram_gb <= 4:
+        base = max(2, base - 1)
+
+    return base
+
+
+domain_counters = defaultdict(lambda: asyncio.Semaphore(get_domain_concurrency()))
 
 
 # === ⚙️ CONFIGURATION ===
-def max_throughput_config():
+def dynamic_parallel_task_limit():
     cores = os.cpu_count() or 4
     ram_gb = psutil.virtual_memory().total // 1_073_741_824
-    task_multiplier = 6 if ram_gb > 16 else 3
 
-    return min(cores * task_multiplier, 512)
+    multiplier = 12 if ram_gb >= 16 else 8
+    return min(cores * multiplier, 512)
 
 
-MAX_PARALLEL_TASKS = max_throughput_config()
+MAX_PARALLEL_TASKS = dynamic_parallel_task_limit()
 LINKS_TO_SCRAP = 10
 SUMMARIES = 5
 
@@ -560,7 +574,7 @@ async def advanced_search_async(query):
     expanded_queries = expand_query_semantically(query)
     query_embed = model_embed.encode(query)
     all_links, results, processed = [], [], set()
-    collected, sem = set(), asyncio.Semaphore(MAX_PARALLEL_TASKS)
+    collected, sem = set(), asyncio.Semaphore(dynamic_parallel_task_limit())
 
     async def worker(url):
         domain = get_main_domain(url)
