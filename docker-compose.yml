@@ -5,6 +5,7 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+      - ./cache/models:/models
     environment:
       - PYTHONUNBUFFERED=1
       - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
