@@ -311,7 +311,6 @@ def extract_keywords(text: str, top_n: int = 10, diversity=0.7):
 
 # === 🌐 RENDER + EXTRACT ===
 async def fetch_rendered_html_playwright(url, timeout=90000):
-    print(f"[PLAYWRIGHT] Starting fetch for {url}")
     browser = None
     try:
         os.makedirs("screenshots", exist_ok=True)
@@ -419,7 +418,6 @@ async def auto_bypass_consent_dialog(page):
         for selector in selectors:
             element = await page.query_selector(selector)
             if element:
-                print(f"[CONSENT] Clicking selector: {selector}")
                 await element.click(force=True)
                 await page.wait_for_timeout(1000)
                 break
@@ -688,8 +686,6 @@ async def search_videos_async(query):
 
     while len(results) < VIDEO_RESULTS_LIMIT:
         elapsed = time.monotonic() - start_time
-        if int(elapsed) % 10 == 0:
-            print(f"[LOOP] {len(results)} results so far after {int(elapsed)}s")
         if elapsed > max_time:
             print("[LOOP] Max time reached, exiting loop.")
             break
@@ -720,7 +716,6 @@ async def search_videos_async(query):
             await asyncio.sleep(0.1)
             continue
 
-        print(f"[TASK] Awaiting {len(tasks)} task(s)...")
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
         for d in done:
@@ -736,7 +731,6 @@ async def search_videos_async(query):
                 print(f"[RESULT ERROR] Failed task: {e}")
 
     if tasks:
-        print(f"[FINAL] Waiting on {len(tasks)} remaining tasks...")
         done, _ = await asyncio.wait(tasks, timeout=15)
         for d in done:
             try:
