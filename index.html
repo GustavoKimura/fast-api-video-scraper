@@ -191,31 +191,66 @@
       </div>
     </template>
 
+    <template x-if="!loading && !error && results.length === 0">
+      <div class="loading">No results found. Try a different search.</div>
+    </template>
+
     <template x-if="error">
       <div class="error" role="status" aria-live="polite">
-        Error searching videos...
+        Error searching videos.
       </div>
     </template>
 
     <div class="grid" x-show="results.length > 0" x-cloak>
       <template
         x-for="(item, index) in results"
-        :key="item.source_url || item.title || index"
+        :key="item.url || item.title || index"
       >
         <article class="card" tabindex="0" aria-label="Search result item">
-          <template x-if="item.video_links && item.video_links.length > 0">
-            <template x-for="videoUrl in item.video_links" :key="videoUrl">
-              <video
-                :src="videoUrl"
-                controls
-                preload="none"
-                playsinline
-                muted
-              ></video>
+          <template x-if="item.videos && item.videos.length > 0">
+            <template
+              x-for="(video, vidx) in item.videos"
+              :key="video.url + vidx"
+            >
+              <div style="margin-bottom: 1rem">
+                <video
+                  :src="video.url"
+                  controls
+                  preload="none"
+                  playsinline
+                  muted
+                ></video>
+                <h3 x-text="video.title || item.title"></h3>
+                <p>
+                  <strong
+                    x-text="'Duration: ' + formatDuration(video.duration)"
+                  ></strong>
+                </p>
+                <div
+                  style="
+                    margin-top: 0.4rem;
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 0.4rem;
+                  "
+                >
+                  <template x-for="tag in video.tags" :key="tag">
+                    <span
+                      style="
+                        display: inline-block;
+                        background: #222;
+                        padding: 4px 8px;
+                        border-radius: 12px;
+                        font-size: 0.75rem;
+                        color: #aad4ff;
+                      "
+                      x-text="tag"
+                    ></span>
+                  </template>
+                </div>
+              </div>
             </template>
           </template>
-          <h3 x-text="item.title"></h3>
-          <p x-text="item.tags?.join(', ')"></p>
         </article>
       </template>
     </div>
@@ -254,6 +289,19 @@
           },
         };
       }
+
+      function formatDuration(seconds) {
+        const sec = parseInt(seconds, 10);
+        if (isNaN(sec) || sec <= 0) return "0:00";
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = sec % 60;
+        return h > 0
+          ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+          : `${m}:${String(s).padStart(2, "0")}`;
+      }
+
+      window.formatDuration = formatDuration;
     </script>
   </body>
 </html>

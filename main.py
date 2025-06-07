@@ -667,24 +667,28 @@ async def extract_video_metadata(url, query_embed):
 
     meta = await extract_metadata(html)
     tags = auto_generate_tags_from_text(f"{text.strip()} {meta['title']}", top_k=10)
-    duration = 0.0
 
+    videos = []
     for video_url in video_links:
         duration = await get_video_duration(video_url)
-        if duration >= 1:
-            break
+        if duration == 0.0:
+            print(f"[DURATION WARNING] No valid duration found for {url}")
 
-    if duration == 0.0:
-        print(f"[DURATION WARNING] No valid duration found for {url}")
+        videos.append(
+            {
+                "url": video_url,
+                "title": meta["title"] or urlparse(video_url).path.split("/")[-1],
+                "tags": tags,
+                "duration": str(int(duration)),
+                "score": 0.0,
+            }
+        )
 
     return {
         "url": url,
-        "video_links": video_links,
         "title": meta["title"] or urlparse(url).netloc,
         "description": meta["description"],
-        "tags": tags,
-        "duration": str(int(duration)),
-        "score": 0.0,
+        "videos": videos,
     }
 
 
@@ -831,23 +835,15 @@ async def search(query: str = "", power_scraping: bool = False):
     results = await search_videos_async(query)
     print(f"[RESULTS] Total results fetched: {len(results)}")
 
-    video_results = [r for r in results if r.get("video_links")]
+    video_results = [r for r in results if r.get("videos")]
     if video_results:
-        print(f"[RESULTS] {len(video_results)} result(s) contain video_links")
+        print(f"[RESULTS] {len(video_results)} result(s) contain videos")
         results = video_results
     else:
-        print(f"[RESULTS] No video_links found, falling back to top 5 videos by score")
-        results = sorted(
-            results,
-            key=lambda x: (
-                x.get("score", 0),
-                -len(x["description"]),
-                get_main_domain(x["url"]),
-            ),
-        )
+        print(f"[RESULTS] No videos found, falling back to raw results")
 
-    results = rank_by_similarity(results, query)
-    print(f"[RANKING] Results ranked by semantic similarity to query")
+    results = sorted(results, key=lambda x: -len(x.get("videos", [])))
+
     print("=== FINAL RESULTS JSON ===")
     print(json.dumps(results, indent=2))
     return JSONResponse(
@@ -856,10 +852,7 @@ async def search(query: str = "", power_scraping: bool = False):
                 "url": r["url"],
                 "title": r["title"],
                 "description": r["description"],
-                "video_links": r["video_links"],
-                "tags": r["tags"],
-                "duration": r["duration"],
-                "score": r["score"],
+                "videos": r["videos"],
             }
             for r in results
         ]
