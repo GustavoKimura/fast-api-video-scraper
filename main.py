@@ -1,5 +1,5 @@
 # === 📦 IMPORTS ===
-import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json, base64, concurrent.futures, subprocess, hashlib
+import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json, base64, concurrent.futures, subprocess
 from urllib.parse import urlparse, urlunparse, urljoin
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -12,7 +12,7 @@ from aiohttp import ClientTimeout, ClientSession
 from keybert import KeyBERT
 from playwright.async_api import async_playwright
 from boilerpy3 import extractors
-from numpy import dot, ndarray
+from numpy import dot, ndarray, zeros
 from numpy.linalg import norm
 from collections import defaultdict, Counter
 from typing import List, Tuple, Callable
@@ -83,14 +83,15 @@ DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 content_extractor = extractors.LargestContentExtractor()
 SEARXNG_BASE_URL = "http://searxng:8080/search"
-
 client_session: ClientSession | None = None
+_session_lock = asyncio.Lock()
 
 
-async def get_client_session() -> ClientSession:
+async def get_client_session():
     global client_session
-    if client_session is None or client_session.closed:
-        client_session = ClientSession(timeout=timeout_obj)
+    async with _session_lock:
+        if client_session is None or client_session.closed:
+            client_session = ClientSession(timeout=timeout_obj)
     return client_session
 
 
@@ -166,10 +167,14 @@ class OpenCLIPEmbedder:
         with self._cache_lock:
             if text in self._cache:
                 return self._cache[text]
-        tokens = self.tokenizer(text).to(self.device)
-        with torch.no_grad():
-            features = self.model.encode_text(tokens).float()
-        result = features.cpu().numpy()[0]
+        try:
+            tokens = self.tokenizer(text).to(self.device)
+            with torch.no_grad():
+                features = self.model.encode_text(tokens).float()
+            result = features.cpu().numpy()[0]
+        except Exception as e:
+            print(f"[EMBED ERROR] Failed to encode '{text}': {e}")
+            result = zeros((512,))
         with self._cache_lock:
             self._cache[text] = result
         return result
@@ -180,7 +185,7 @@ kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
 
 
 def expand_query_semantically(query: str, top_n: int = 5):
-    raw_keywords = extract_keywords(query, diversity=0.8, top_n=top_n * 2)
+    raw_keywords = extract_keywords(query, diversity=0.8)
     query_vec = model_embed.encode_cached(query)
     filtered = []
 
@@ -238,13 +243,15 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
         score = 0.0
 
         if r.get("is_stream", False):
-            score *= 0.6
+            score_penalty += 0.4
 
         if r.get("tags"):
             tag_text = " ".join(r["tags"])
             tag_embed = model_embed.encode_cached(tag_text)
             sim = cosine_sim(query_embed, tag_embed)
             result_tags = normalize_tags(r.get("tags", []))
+            if not isinstance(result_tags, str) or not result_tags.strip():
+                continue
             query_tags_norm = normalize_tags(list(query_tags))
             overlap = len(query_tags_norm & result_tags)
             boost = sum(tag_boosts.get(normalize_tag(tag), 0) for tag in r["tags"])
@@ -261,6 +268,10 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             score = cosine_sim(query_embed, title_embed) * 0.6
 
         r["score"] = score - score_penalty
+
+        if "score" not in r:
+            r["score"] = 0.0
+
         final.append(r)
 
     if final:
@@ -277,7 +288,7 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
 def rank_deep_links(links, query_embed):
     scored = []
     for link in links:
-        snippet = re.sub(r"[-_/]", " ", link.split("/")[-1])
+        snippet = re.sub(r"[-_/]", " ", urlparse(link).path.split("/")[-1])
         embed = model_embed.encode_cached(snippet)
         sim = cosine_sim(query_embed, embed)
         scored.append((sim, link))
@@ -358,6 +369,7 @@ def duration_to_seconds(duration_str: str):
             return 0
         return hours * 3600 + minutes * 60 + seconds
     except ValueError:
+        print(f"[WARNING] Invalid duration format: {duration_str}")
         return 0
 
 
@@ -440,9 +452,13 @@ async def get_video_resolution_score(url: str) -> int:
 
 def extract_tags(text: str, top_n: int = 10):
     clean = re.sub(r"[^a-zA-Z0-9\s]", "", text).lower()
-    raw_results = extract_keywords(clean, diversity=0.7, top_n=top_n)
+    raw_results = extract_keywords(clean, diversity=0.7)
 
-    if raw_results and isinstance(raw_results[0], list):
+    if (
+        raw_results
+        and isinstance(raw_results, list)
+        and isinstance(raw_results[0], list)
+    ):
         flat: List[Tuple[str, float]] = []
         for sublist in raw_results:
             flat.extend(
@@ -458,8 +474,6 @@ def extract_tags(text: str, top_n: int = 10):
             flat.extend(i for i in item if isinstance(i, tuple) and len(i) == 2)
     return flat
 
-    return []
-
 
 def boost_by_tag_cooccurrence(results):
     co_pairs = Counter()
@@ -473,6 +487,8 @@ def boost_by_tag_cooccurrence(results):
     for r in results:
         tags_raw = r.get("tags", [])
         if not tags_raw:
+            if not isinstance(tag, str) or not tag.strip():
+                continue
             fallback_tags = auto_generate_tags_from_text(
                 r.get("title", "") + " " + r.get("url", "")
             )
@@ -513,13 +529,12 @@ def is_probable_video_url(url: str):
     )
 
 
-def extract_keywords(text: str, top_n: int = 10, diversity=0.7):
+def extract_keywords(text: str, diversity=0.7):
     return kw_model.extract_keywords(
         text,
         keyphrase_ngram_range=(1, 3),
         use_mmr=True,
         diversity=diversity,
-        top_n=min(top_n, 5),
     )
 
 
@@ -557,7 +572,7 @@ def clean_tag_text(tag):
 
 def normalize_tag(tag: str):
     tag = clean_tag_text(re.sub(r"[^a-z0-9]", "", tag.lower()))
-    tag = re.sub(r"(consent|cookie|agree|explicit|adult|enter|age|18\+?)", "", tag)
+    tag = re.sub(r"\b(consent|cookie|agree|enter|age|18(?:\+)?(?:only)?)\b", "", tag)
     return tag.strip()
 
 
@@ -579,7 +594,6 @@ async def deduplicate_videos(videos: list[dict]) -> list[dict]:
             frozenset(normalize_tags(video.get("tags", []))),
             round(float(video.get("duration", 0)), 1),
             base,
-            hashlib.md5(video["url"].encode()).hexdigest()[:8],
         )
 
         if key not in seen:
@@ -753,7 +767,8 @@ async def fetch_rendered_html_playwright(
                     return html, video_urls
             except Exception as e:
                 print(f"[RETRY {attempt}] Error fetching {url}: {e}")
-            await asyncio.sleep(2 * (attempt + 1))
+            finally:
+                await asyncio.sleep(2 * (attempt + 1))
 
         if "browser" in locals() and browser:
             try:
@@ -801,7 +816,7 @@ def extract_content(html):
 
 async def auto_bypass_consent_dialog(page):
     try:
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(300)
         selectors = [
             "text=Enter",
             "text=I Agree",
@@ -870,17 +885,14 @@ async def extract_metadata(html, url):
 
 
 def auto_generate_tags_from_text(text, top_k=5):
-    raw = extract_keywords(text, diversity=0.7, top_n=top_k * 2)
+    raw = extract_keywords(text, diversity=0.7)
     flat: List[Tuple[str, float]] = []
 
     for item in raw:
-        flat: List[Tuple[str, float]] = []
-        for item in raw:
-            if isinstance(item, tuple) and len(item) == 2:
-                flat.append(item)
-            elif isinstance(item, list):
-                flat.extend(i for i in item if isinstance(i, tuple) and len(i) == 2)
-        return flat
+        if isinstance(item, tuple) and len(item) == 2:
+            flat.append(item)
+        elif isinstance(item, list):
+            flat.extend(i for i in item if isinstance(i, tuple) and len(i) == 2)
 
     tag_set = []
     for kw, _ in flat:
@@ -1039,8 +1051,8 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     if not is_valid_link(url):
         return None
 
-    html, _ = await fetch_rendered_html_playwright(url)
-    if not html.strip():
+    html, video_links = await fetch_rendered_html_playwright(url)
+    if not video_links:
         print(f"[ERROR] No HTML content fetched from {url}")
         return None
 
