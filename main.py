@@ -88,39 +88,6 @@ BLOCKED_DOMAINS = {
 
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
-VIDEO_HINTS = [
-    "/video/",
-    "/videos/",
-    "/media/",
-    "/watch/",
-    "/view/",
-    "/play/",
-    "/embed/",
-    "/clip/",
-    "/v/",
-    "viewkey=",
-    "vid=",
-    "videoid=",
-    ".mp4",
-    ".webm",
-    ".m3u8",
-    ".mov",
-    "cdn.videos",
-    "stream=",
-    "media?id=",
-    "/file/",
-    "/stream/",
-    "/content/video/",
-    "streaming",
-    "mediafile",
-    "video-player",
-    "file.mp4",
-    "embed",
-    "watch",
-    "contentUrl",
-    "/files/",
-]
-
 
 # === 🧠 MODELS ===
 class OpenCLIPEmbedder:
@@ -339,16 +306,11 @@ def boost_by_tag_cooccurrence(results):
     return tag_boosts
 
 
-def is_probable_video_url(url: str):
-    url = url.lower()
-    return (
-        any(ext in url for ext in [".mp4", ".webm", ".m3u8", ".mov"])
-        or any(
-            kw in url
-            for kw in ["video", "watch", "play", "stream", "embed", "cdn", "media"]
-        )
-        or bool(re.search(r"/\d{4,}/[^/]+/?$", url))
-    )
+def is_probable_video_url(url: str) -> bool:
+    video_exts = (".mp4", ".webm", ".m3u8", ".mov")
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    return any(path.endswith(ext) for ext in video_exts)
 
 
 def safe_filename(url: str, with_timestamp: bool = True) -> str:
