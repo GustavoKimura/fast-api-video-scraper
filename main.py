@@ -145,7 +145,7 @@ def cosine_sim(a, b):
     return float(dot(a, b) / (norm(a) * norm(b) + 1e-8))
 
 
-def rank_by_similarity(results, query, min_duration=30, max_duration=1800):
+def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
     query_embed = model_embed.encode(query)
     query_tags = {kw for kw, _ in extract_tags(query)}
     tag_boosts = boost_by_tag_cooccurrence(results)
