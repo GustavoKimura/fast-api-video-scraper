@@ -1,5 +1,5 @@
 # === 📦 IMPORTS ===
-import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json, base64, concurrent.futures, subprocess
+import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json, base64, concurrent.futures, subprocess, hashlib
 from urllib.parse import urlparse, urlunparse, urljoin
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -12,14 +12,17 @@ from aiohttp import ClientTimeout, ClientSession
 from keybert import KeyBERT
 from playwright.async_api import async_playwright
 from boilerpy3 import extractors
-from numpy import dot
+from numpy import dot, ndarray
 from numpy.linalg import norm
 from collections import defaultdict, Counter
-from typing import List, Tuple
+from typing import List, Tuple, Callable
 from itertools import combinations
 from difflib import SequenceMatcher
 from playwright_stealth import stealth_async
-from functools import lru_cache
+from threading import Lock
+
+# === 🧾 EXECUTOR ===
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=(os.cpu_count() or 4) * 2)
 
 
 # === 🔒 DOMAIN CONCURRENCY CONTROL ===
@@ -49,7 +52,7 @@ def get_ffprobe_concurrency():
 async def run_ffprobe(cmd):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        executor, lambda: subprocess.check_output(cmd).decode().strip()
+        executor, lambda: subprocess.check_output(cmd, timeout=15).decode().strip()
     )
 
 
@@ -57,7 +60,7 @@ async def run_ffprobe_json(cmd):
     loop = asyncio.get_running_loop()
 
     def run():
-        result = subprocess.check_output(cmd).decode().strip()
+        result = subprocess.check_output(cmd, timeout=15).decode().strip()
         return json.loads(result)
 
     return await loop.run_in_executor(executor, run)
@@ -65,7 +68,6 @@ async def run_ffprobe_json(cmd):
 
 domain_counters = defaultdict(lambda: asyncio.Semaphore(get_domain_concurrency()))
 ffprobe_sem = asyncio.Semaphore(get_ffprobe_concurrency())
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=(os.cpu_count() or 4) * 2)
 
 
 # === ⚙️ CONFIGURATION ===
@@ -81,6 +83,15 @@ DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 content_extractor = extractors.LargestContentExtractor()
 SEARXNG_BASE_URL = "http://searxng:8080/search"
+
+client_session: ClientSession | None = None
+
+
+async def get_client_session() -> ClientSession:
+    global client_session
+    if client_session is None or client_session.closed:
+        client_session = ClientSession(timeout=timeout_obj)
+    return client_session
 
 
 USER_AGENTS = [
@@ -135,21 +146,33 @@ LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 # === 🧠 MODELS ===
 class OpenCLIPEmbedder:
     def __init__(
-        self, model_name="ViT-B-32", pretrained="laion2b_s34b_b79k", device=None
+        self,
+        model_name: str = "ViT-B-32",
+        pretrained: str = "laion2b_s34b_b79k",
+        device: str | None = None,
     ):
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device: str = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model, _, _ = open_clip.create_model_and_transforms(
             model_name, pretrained=pretrained
         )
         self.model = self.model.to(self.device)
-        self.tokenizer = open_clip.get_tokenizer(model_name)
+        self.tokenizer: Callable[[str], torch.Tensor] = open_clip.get_tokenizer(
+            model_name
+        )
+        self._cache: dict[str, ndarray] = {}
+        self._cache_lock = Lock()
 
-    @lru_cache(maxsize=1024)
     def encode_cached(self, text: str):
+        with self._cache_lock:
+            if text in self._cache:
+                return self._cache[text]
         tokens = self.tokenizer(text).to(self.device)
         with torch.no_grad():
             features = self.model.encode_text(tokens).float()
-        return features.cpu().numpy()[0]
+        result = features.cpu().numpy()[0]
+        with self._cache_lock:
+            self._cache[text] = result
+        return result
 
 
 model_embed = OpenCLIPEmbedder(model_name="ViT-B-32", pretrained="laion2b_s34b_b79k")
@@ -182,7 +205,11 @@ def expand_query_semantically(query: str, top_n: int = 5):
 
 # === 🧩 SEMANTIC RANKING ===
 def cosine_sim(a, b):
-    return float(dot(a, b) / (norm(a) * norm(b) + 1e-8))
+    norm_a = norm(a)
+    norm_b = norm(b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return float(dot(a, b) / (norm_a * norm_b))
 
 
 def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
@@ -264,7 +291,7 @@ def get_user_agent():
 
 
 def normalize_url(url):
-    return urlunparse(urlparse(url)._replace(query="", fragment=""))
+    return urlunparse(urlparse(url)._replace(fragment=""))
 
 
 def get_main_domain(url):
@@ -423,10 +450,13 @@ def extract_tags(text: str, top_n: int = 10):
             )
         return flat
 
-    if isinstance(raw_results, list) and all(
-        isinstance(t, tuple) and len(t) == 2 for t in raw_results
-    ):
-        return raw_results  # type: ignore
+    flat: List[Tuple[str, float]] = []
+    for item in raw_results:
+        if isinstance(item, tuple) and len(item) == 2:
+            flat.append(item)
+        elif isinstance(item, list):
+            flat.extend(i for i in item if isinstance(i, tuple) and len(i) == 2)
+    return flat
 
     return []
 
@@ -451,7 +481,7 @@ def boost_by_tag_cooccurrence(results):
 
         canonical_tags = []
         for tag in tags_raw:
-            norm = normalize_tag(tag)
+            norm = normalize_tag(str(tag))
             can = canonical_tag(norm)
             seen_tag_sets[norm] = can
             canonical_tags.append(can)
@@ -537,11 +567,11 @@ def normalize_tags(tags: list[str]):
 
 async def deduplicate_videos(videos: list[dict]) -> list[dict]:
     seen = {}
+    scores = {}
 
     async def get_score(video):
         return await get_video_resolution_score(video["url"])
 
-    tasks = {}
     for video in videos:
         base = re.sub(r"\.(mp4|webm|m3u8|mov)$", "", video["url"].lower())
         key = (
@@ -549,17 +579,17 @@ async def deduplicate_videos(videos: list[dict]) -> list[dict]:
             frozenset(normalize_tags(video.get("tags", []))),
             round(float(video.get("duration", 0)), 1),
             base,
+            hashlib.md5(video["url"].encode()).hexdigest()[:8],
         )
 
         if key not in seen:
             seen[key] = video
-            tasks[key] = asyncio.create_task(get_score(video))
+            scores[key] = await get_score(video)
         else:
-            new_score = await get_video_resolution_score(video["url"])
-            old_score = await tasks[key]
-            if new_score > old_score:
+            new_score = await get_score(video)
+            if new_score > scores[key]:
                 seen[key] = video
-                tasks[key] = asyncio.create_task(get_score(video))
+                scores[key] = new_score
 
     return list(seen.values())
 
@@ -725,10 +755,11 @@ async def fetch_rendered_html_playwright(
                 print(f"[RETRY {attempt}] Error fetching {url}: {e}")
             await asyncio.sleep(2 * (attempt + 1))
 
-        try:
-            await browser.close()
-        except Exception as e:
-            print(f"[BROWSER CLOSE ERROR] {e}")
+        if "browser" in locals() and browser:
+            try:
+                await browser.close()
+            except Exception as e:
+                print(f"[BROWSER CLOSE ERROR] {e}")
 
     return "", []
 
@@ -843,12 +874,13 @@ def auto_generate_tags_from_text(text, top_k=5):
     flat: List[Tuple[str, float]] = []
 
     for item in raw:
-        if isinstance(item, tuple) and isinstance(item[0], str):
-            flat.append(item)
-        elif isinstance(item, list):
-            flat.extend(
-                x for x in item if isinstance(x, tuple) and isinstance(x[0], str)
-            )
+        flat: List[Tuple[str, float]] = []
+        for item in raw:
+            if isinstance(item, tuple) and len(item) == 2:
+                flat.append(item)
+            elif isinstance(item, list):
+                flat.extend(i for i in item if isinstance(i, tuple) and len(i) == 2)
+        return flat
 
     tag_set = []
     for kw, _ in flat:
@@ -982,7 +1014,7 @@ async def extract_video_sources(html, base_url, power_scraping):
             if isinstance(data, dict):
                 data = [data]
             for item in data:
-                if isinstance(item, dict):
+                if isinstance(item, dict) and item.get("@type") == "VideoObject":
                     video_url = item.get("contentUrl") or item.get("embedUrl")
                     if video_url and is_probable_video_url(video_url):
                         sources.add(urljoin(base_url, video_url))
@@ -1114,7 +1146,7 @@ async def extract_video_metadata(url, query_embed, power_scraping):
             continue
         seen_video_urls.add(video_url)
         duration = await asyncio.wait_for(
-            get_video_duration(url, query_embed),
+            get_video_duration(video_url, html),
             timeout=60 if power_scraping else 30,
         )
         if duration == 0.0:
@@ -1181,26 +1213,26 @@ async def search_engine_async(query, link_count):
 
     for attempt in range(retries):
         try:
-            async with ClientSession(timeout=timeout_obj) as session:
-                async with session.post(
-                    SEARXNG_BASE_URL,
-                    data=payload,
-                    headers={"User-Agent": get_user_agent()},
-                ) as resp:
-                    if resp.status != 200:
-                        raise Exception(f"HTTP {resp.status}")
-                    data = await resp.json()
-                    last_data = data
-                    results = []
-                    for r in data.get("results", []):
-                        u = r.get("url")
-                        if not is_valid_link(u):
-                            continue
-                        if urlparse(u).path.strip("/") == "":
-                            continue
-                        results.append(u)
-                    if results:
-                        return results[:link_count]
+            session = await get_client_session()
+            async with session.post(
+                SEARXNG_BASE_URL,
+                data=payload,
+                headers={"User-Agent": get_user_agent()},
+            ) as resp:
+                if resp.status != 200:
+                    raise Exception(f"HTTP {resp.status}")
+                data = await resp.json()
+                last_data = data
+                results = []
+                for r in data.get("results", []):
+                    u = r.get("url")
+                    if not is_valid_link(u):
+                        continue
+                    if urlparse(u).path.strip("/") == "":
+                        continue
+                    results.append(u)
+                if results:
+                    return results[:link_count]
         except Exception as e:
             print(f"[SEARCH ERROR] Attempt {attempt+1}: {e}")
             await asyncio.sleep(2 * (attempt + 1))
@@ -1208,7 +1240,7 @@ async def search_engine_async(query, link_count):
     print("[FALLBACK] Using partial data from last attempt.")
 
     fallback = []
-    for r in last_data.get("results", []):
+    for r in last_data.get("results", []) if last_data else []:
         u = r.get("url")
         if not is_valid_link(u):
             continue
@@ -1225,8 +1257,8 @@ async def search_videos_async(
     video_count = 0
     max_videos = videos_to_return
 
-    expanded_queries = [q for q in expand_query_semantically(query) if q.strip()]
-    if not expanded_queries:
+    expanded_queries = [q for q in expand_query_semantically(query) if q.strip()][:5]
+    if not expanded_queries or all(not q.strip() for q in expanded_queries):
         expanded_queries = [query]
     print(f"[DEBUG] Expanded queries: {expanded_queries}")
 
