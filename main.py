@@ -181,7 +181,7 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             continue
 
         if dur_secs <= 0:
-            score_penalty = 0.1
+            score_penalty = 0.2
         else:
             if not (min_duration <= dur_secs <= max_duration):
                 continue
@@ -329,6 +329,8 @@ async def get_video_duration(url: str, html: str = "") -> float:
             )
             stdout, _ = await proc.communicate()
             duration_str = stdout.decode().strip()
+            if not duration_str:
+                raise ValueError("Empty duration from ffprobe")
             duration = float(duration_str)
             if duration > 0:
                 return duration
@@ -1125,8 +1127,12 @@ async def extract_video_metadata(url, query_embed):
     meta = await extract_metadata(html, url)
     tags = auto_generate_tags_from_text(f"{text.strip()} {meta['title']}", top_k=10)
 
+    seen_video_urls = set()
     videos = []
     for video_url in video_links:
+        if video_url in seen_video_urls:
+            continue
+        seen_video_urls.add(video_url)
         duration = await get_video_duration(video_url, html)
         if duration == 0.0:
             print(f"[DURATION WARNING] No valid duration found for {url}")
@@ -1206,7 +1212,7 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
     print(f"[DEBUG] Expanded queries: {expanded_queries}")
 
     query_embed = model_embed.encode(query)
-    all_links, results, processed = [], [], set()
+    all_links, results, processed, seen_video_urls = [], [], set(), set()
     collected = set()
     sem = asyncio.Semaphore(min(MAX_PARALLEL_TASKS, 8))
 
@@ -1278,16 +1284,31 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
             try:
                 result = d.result()
                 if result:
-                    num_new = len(result.get("videos", []))
-                    if video_count + num_new > max_videos:
-                        result["videos"] = result["videos"][: max_videos - video_count]
-                        num_new = len(result["videos"])
-                    if num_new > 0:
-                        results.append(result)
-                        video_count += num_new
-                    print(
-                        f"[RESULT][QUERY: {query}] Received result from task: {result.get('url')}"
-                    )
+                    unique_videos = []
+                    for video in result.get("videos", []):
+                        if video["url"] in seen_video_urls:
+                            continue
+                        seen_video_urls.add(video["url"])
+                        unique_videos.append(video)
+
+                    if unique_videos:
+                        result["videos"] = unique_videos
+                        num_new = len(unique_videos)
+
+                        if video_count + num_new > max_videos:
+                            result["videos"] = result["videos"][
+                                : max_videos - video_count
+                            ]
+                            num_new = len(result["videos"])
+
+                        if num_new > 0:
+                            results.append(result)
+                            video_count += num_new
+
+                        print(
+                            f"[RESULT][QUERY: {query}] Received result from task: {result.get('url')}"
+                        )
+
             except Exception as e:
                 print(f"[RESULT ERROR] Failed task: {e}")
 
@@ -1300,14 +1321,31 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
             try:
                 result = d.result()
                 if result:
-                    num_new = len(result.get("videos", []))
-                    if video_count + num_new > max_videos:
-                        result["videos"] = result["videos"][: max_videos - video_count]
-                        num_new = len(result["videos"])
-                    if num_new > 0:
-                        results.append(result)
-                        video_count += num_new
-                        print(f"[FINAL RESULT] Received from: {result.get('url')}")
+                    unique_videos = []
+                    for video in result.get("videos", []):
+                        if video["url"] in seen_video_urls:
+                            continue
+                        seen_video_urls.add(video["url"])
+                        unique_videos.append(video)
+
+                    if unique_videos:
+                        result["videos"] = unique_videos
+                        num_new = len(unique_videos)
+
+                        if video_count + num_new > max_videos:
+                            result["videos"] = result["videos"][
+                                : max_videos - video_count
+                            ]
+                            num_new = len(result["videos"])
+
+                        if num_new > 0:
+                            results.append(result)
+                            video_count += num_new
+
+                        print(
+                            f"[RESULT][QUERY: {query}] Received result from task: {result.get('url')}"
+                        )
+
             except Exception as e:
                 print(f"[FINAL RESULT ERROR] {e}")
 
