@@ -270,7 +270,6 @@ def duration_to_seconds(duration_str: str):
 
 
 async def get_video_duration(url: str, html: str = "") -> float:
-    # Try ffprobe first
     async with ffprobe_sem:
         try:
             cmd = [
@@ -315,6 +314,45 @@ async def get_video_duration(url: str, html: str = "") -> float:
         return float(minutes * 60)
 
     return 0.0
+
+
+async def get_video_resolution_score(url: str) -> int:
+    async with ffprobe_sem:
+        try:
+            cmd = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,bit_rate",
+                "-of",
+                "json",
+                url,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            data = json.loads(stdout.decode())
+
+            if "streams" in data and data["streams"]:
+                stream = data["streams"][0]
+                width = stream.get("width", 0)
+                height = stream.get("height", 0)
+                bitrate = stream.get("bit_rate", 0)
+
+                resolution_score = width * height
+                bitrate_score = (
+                    int(bitrate) if isinstance(bitrate, str) else bitrate or 0
+                )
+                return resolution_score + (bitrate_score // 1000)
+        except Exception as e:
+            print(f"[FFPROBE-RES ERROR] {url}: {e}")
+    return 0
 
 
 def extract_tags(text: str, top_n: int = 10):
@@ -381,12 +419,48 @@ def is_sensible_keyword(kw):
     return True
 
 
+def clean_tag_text(tag):
+    tag = re.sub(r"(.)\1{2,}", r"\1", tag)
+    tag = re.sub(r"([a-z])([A-Z])", r"\1 \2", tag)
+    tag = re.sub(r"([a-z])(\d+)", r"\1 \2", tag)
+    return tag.lower().strip()
+
+
 def normalize_tag(tag: str):
-    return re.sub(r"[^a-z0-9]", "", tag.lower())
+    return clean_tag_text(re.sub(r"[^a-z0-9]", "", tag.lower()))
 
 
 def normalize_tags(tags: list[str]):
     return {normalize_tag(tag) for tag in tags}
+
+
+async def deduplicate_videos(videos: list[dict]) -> list[dict]:
+    seen = {}
+
+    async def get_score(video):
+        return await get_video_resolution_score(video["url"])
+
+    tasks = {}
+    for video in videos:
+        base = re.sub(r"[\-_](\d{3,4})[xX_](\d{3,4})[\-_]?\d*fps?", "", video["url"])
+        key = (
+            normalize_tag(video["title"]),
+            frozenset(normalize_tags(video.get("tags", []))),
+            round(float(video.get("duration", 0)), 1),
+            base,
+        )
+
+        if key not in seen:
+            seen[key] = video
+            tasks[key] = asyncio.create_task(get_score(video))
+        else:
+            new_score = await get_video_resolution_score(video["url"])
+            old_score = await tasks[key]
+            if new_score > old_score:
+                seen[key] = video
+                tasks[key] = asyncio.create_task(get_score(video))
+
+    return list(seen.values())
 
 
 # === 🌐 RENDER + EXTRACT ===
@@ -794,6 +868,8 @@ async def extract_video_metadata(url, query_embed):
         if not videos:
             return None
 
+    videos = await deduplicate_videos(videos)
+
     return {
         "url": url,
         "title": meta["title"] or urlparse(url).netloc,
@@ -959,7 +1035,7 @@ async def search(query: str = "", power_scraping: bool = False):
             video["source_title"] = result["title"]
             all_videos.append(video)
 
-    ranked_videos = rank_by_similarity(all_videos, query)
+    ranked_videos = rank_by_similarity(await deduplicate_videos(all_videos), query)
 
     ranked_results = {}
     for video in ranked_videos:
