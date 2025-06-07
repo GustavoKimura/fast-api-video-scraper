@@ -717,6 +717,16 @@ async def fetch_rendered_html_playwright(
                     }""",
                 )
                 await page.wait_for_timeout(1500)
+                await safe_evaluate(
+                    page,
+                    """() => {
+                        const links = document.querySelectorAll('a[href*="/video"], a.thumbnail, a.video-thumb');
+                        for (const link of links) {
+                            try { link.click(); } catch (_) {}
+                        }
+                    }""",
+                )
+                await page.wait_for_timeout(1200)
 
                 last_height = await safe_evaluate(page, "document.body.scrollHeight")
                 for _ in range(5):
@@ -1052,6 +1062,13 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     if not html or not html.strip():
         print(f"[ERROR] No HTML content fetched from {url}")
         return None
+    try:
+        debug_path = f"debug_{get_main_domain(url)}.html"
+        with open(debug_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"[DEBUG] Saved raw HTML to {debug_path}")
+    except Exception as e:
+        print(f"[DEBUG HTML SAVE ERROR] {e}")
 
     video_links = await extract_video_sources(html, url, power_scraping)
     candidate_links = []
@@ -1169,7 +1186,9 @@ async def extract_video_metadata(url, query_embed, power_scraping):
                 duration = 60.0
 
         if video_url.startswith("blob:"):
-            print(f"[SKIP] Ignoring stream (blob): {video_url}")
+            print(
+                f"[SKIP] Ignoring unsupported blob stream: {video_url} — parent: {url}"
+            )
             continue
 
         if duration == 0:
@@ -1290,7 +1309,7 @@ async def search_videos_async(
                     print(f"[RETRY] Timeout, retrying with reduced timeout: {url}")
                     result = await asyncio.wait_for(
                         extract_video_metadata(url, query_embed, power_scraping),
-                        timeout=30,
+                        timeout=45 if power_scraping else 30,
                     )
 
                 if result and result.get("videos"):
