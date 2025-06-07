@@ -1505,7 +1505,6 @@ def index():
 async def search(query: str = "", power_scraping: bool = False):
     print("=== STARTING SEARCH ===")
     MINIMUM_VIDEOS_TO_RETURN = 10
-
     videos_to_return = (
         min((os.cpu_count() or 4) * 10, 500)
         if power_scraping
@@ -1519,8 +1518,8 @@ async def search(query: str = "", power_scraping: bool = False):
         results = []
 
     print(f"[RESULTS] Total results fetched: {len(results)}")
-
     video_results = [r for r in results if r.get("videos")]
+
     if video_results:
         print(f"[RESULTS] {len(video_results)} result(s) contain videos")
         results = video_results
@@ -1534,9 +1533,13 @@ async def search(query: str = "", power_scraping: bool = False):
             video["source_title"] = result["title"]
             all_videos.append(video)
 
-    ranked_videos = rank_by_similarity(await deduplicate_videos(all_videos), query)[
-        :videos_to_return
-    ]
+    try:
+        deduped = await asyncio.wait_for(deduplicate_videos(all_videos), timeout=30)
+    except asyncio.TimeoutError:
+        print("[DEDUPLICATION TIMEOUT] Skipping deduplication step")
+        deduped = all_videos
+
+    ranked_videos = rank_by_similarity(deduped, query)[:videos_to_return]
 
     ranked_results = {}
     for video in ranked_videos:
@@ -1551,6 +1554,9 @@ async def search(query: str = "", power_scraping: bool = False):
         ranked_results[parent_url]["videos"].append(video)
 
     results = list(ranked_results.values())
+
+    os.environ["DISABLE_POST_RESPONSE_LOGS"] = "1"
+
     print("=== FINAL RESULTS JSON ===")
     print(json.dumps(results, indent=2))
 
@@ -1570,6 +1576,7 @@ async def search(query: str = "", power_scraping: bool = False):
                         ),
                         "is_stream": video.get("is_stream", False),
                     }
+                    for video in r["videos"]
                 ],
             }
             for r in results
