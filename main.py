@@ -387,20 +387,17 @@ async def fetch_rendered_html_playwright(url, timeout=60000):
                         print(f"[AUTO-NAV] Trying video subpage: {best_link}")
                         await page.goto(best_link, timeout=timeout)
                         await page.wait_for_load_state("networkidle")
-                        html = await page.content()
-                        if any(
-                            t in html
-                            for t in (
-                                "<video",
-                                "jwplayer",
-                                "m3u8",
-                                ".mp4",
-                                "contentUrl",
-                            )
+                        await page.wait_for_timeout(3000)
+                        sub_html = await page.content()
+                        if (
+                            "<video" in sub_html
+                            or "jwplayer" in sub_html
+                            or "m3u8" in sub_html
                         ):
-                            return html
+                            return sub_html
                     except Exception as e:
                         print(f"[AUTO-NAV] Failed to extract from {best_link}: {e}")
+
             except Exception as e:
                 print(f"[WARNING] Smart link follow failed: {e}")
 
@@ -446,6 +443,22 @@ async def fetch_rendered_html_playwright(url, timeout=60000):
 
             if not html.strip():
                 print(f"[DEBUG] Empty HTML from {url}")
+
+                import re, os
+
+                def safe_filename(url):
+                    name = re.sub(r"[^\w\-_.]", "_", url)
+                    return name[:100]
+
+                os.makedirs("screenshots", exist_ok=True)
+                try:
+                    await page.screenshot(
+                        path=f"screenshots/{safe_filename(url)}.png", full_page=True
+                    )
+                    print(f"[SCREENSHOT SAVED] screenshots/{safe_filename(url)}.png")
+                except Exception as e:
+                    print(f"[SCREENSHOT ERROR] Failed to capture screenshot: {e}")
+
                 return ""
 
             return html
@@ -688,6 +701,9 @@ async def process_url_async(url, query_embed):
                 url = deep_url
                 video_links = deep_sources
                 break
+    else:
+        print(f"[DEBUG] Extracted {len(video_links)} video links from {url}")
+
     soup = BeautifulSoup(html, "lxml")
     video_elements = soup.find_all(["video", "source"])
     print(
