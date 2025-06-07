@@ -15,7 +15,7 @@ from boilerpy3 import extractors
 from numpy import dot, ndarray, zeros
 from numpy.linalg import norm
 from collections import defaultdict, Counter
-from typing import List, Tuple, Callable, cast
+from typing import List, Tuple, Callable
 from itertools import combinations
 from difflib import SequenceMatcher
 from playwright_stealth import stealth_async
@@ -790,6 +790,22 @@ async def fetch_rendered_html_playwright(
                     logging.debug(f"No video/player selectors found during wait: {e}")
 
                 html = await page.content()
+
+                video_urls_dom = await safe_evaluate(
+                    page,
+                    """() => {
+                        const urls = new Set();
+                        document.querySelectorAll('video, source').forEach(el => {
+                            const src = el.src || el.getAttribute('data-src') || el.getAttribute('data-hd-src');
+                            if (src && (src.includes('.mp4') || src.includes('.webm') || src.includes('.m3u8'))) {
+                                urls.add(src);
+                            }
+                        });
+                        return Array.from(urls);
+                    }""",
+                )
+                if isinstance(video_urls_dom, list):
+                    video_requests.extend(video_urls_dom)
             except Exception as e:
                 logging.info(f"NAVIGATION ERROR - {url}: {e}")
                 return "", []
@@ -1177,17 +1193,10 @@ async def extract_video_metadata(url, query_embed, power_scraping):
         return None
 
     html, video_links = await fetch_rendered_html_playwright(url)
+    html = preprocess_html(html)
     if not html or not html.strip():
         logging.error(f"No HTML content fetched from {url}")
         return None
-    try:
-        os.makedirs("debug_html", exist_ok=True)
-        debug_path = os.path.join("debug_html", f"debug_{get_main_domain(url)}.html")
-        with open(debug_path, "w", encoding="utf-8") as f:
-            f.write(html)
-        logging.debug(f"Saved raw HTML to {debug_path}")
-    except Exception as e:
-        logging.error(f"HTML SAVE ERROR - {e}")
 
     video_links = await extract_video_sources(html, url, power_scraping)
     candidate_links = []
@@ -1273,9 +1282,14 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     if len(text) < 200:
         text = extract_content(html)
 
-    if len(text) < 100:
-        logging.error(f"Unable to extract usable text from {url}")
-        return None
+    if len(text) < 100 and video_links:
+        if video_links:
+            logging.warning(
+                f"Short extracted text (<100 chars) but videos were found. Proceeding anyway."
+            )
+        else:
+            logging.error(f"Unable to extract usable text and no videos: {url}")
+            return None
 
     lang = detect_language(text)
     if lang != "en":
@@ -1294,15 +1308,18 @@ async def extract_video_metadata(url, query_embed, power_scraping):
             get_video_duration(video_url, html),
             timeout=60 if power_scraping else 30,
         )
-        if duration == 0.0:
-            logging.warning(f"No valid duration found for {url}")
 
-        is_stream = False
-        if "m3u8" in video_url:
-            logging.info(f"Stream detected (m3u8): {video_url}")
-            is_stream = True
-            if duration == 0.0:
+        is_stream = "m3u8" in video_url
+        if duration == 0.0:
+            if is_stream:
+                logging.warning(
+                    f"No duration, assuming default 60s for stream: {video_url}"
+                )
                 duration = 60.0
+            else:
+                logging.warning(f"No valid duration found for {video_url}")
+        if is_stream:
+            logging.info(f"Stream detected (m3u8): {video_url}")
 
         if video_url.startswith("blob:"):
             logging.debug(
