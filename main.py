@@ -25,14 +25,11 @@ from playwright_stealth import stealth_async
 def get_domain_concurrency():
     cores = os.cpu_count() or 4
     ram_gb = psutil.virtual_memory().total // 1_073_741_824
-
     base = max(2, min((cores // 2), 10))
-
     if ram_gb >= 16:
         base += 2
     elif ram_gb <= 4:
         base = max(2, base - 1)
-
     return base
 
 
@@ -43,7 +40,6 @@ domain_counters = defaultdict(lambda: asyncio.Semaphore(get_domain_concurrency()
 def dynamic_parallel_task_limit():
     cores = os.cpu_count() or 4
     ram_gb = psutil.virtual_memory().total // 1_073_741_824
-
     multiplier = 12 if ram_gb >= 16 else 8
     return min(cores * multiplier, 512)
 
@@ -51,7 +47,6 @@ def dynamic_parallel_task_limit():
 MAX_PARALLEL_TASKS = dynamic_parallel_task_limit()
 VIDEOS_TO_SEARCH = 10
 VIDEO_RESULTS_LIMIT = 5
-
 DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 content_extractor = extractors.LargestContentExtractor()
@@ -113,11 +108,7 @@ kw_model = KeyBERT("sentence-transformers/all-MiniLM-L6-v2")
 
 
 def expand_query_semantically(query: str, top_n: int = 5):
-    raw_keywords = extract_keywords(
-        query,
-        diversity=0.8,
-        top_n=top_n * 2,
-    )
+    raw_keywords = extract_keywords(query, diversity=0.8, top_n=top_n * 2)
     query_vec = model_embed.encode(query)
     filtered = []
 
@@ -146,12 +137,11 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=1800):
     query_tags = {kw for kw, _ in extract_tags(query)}
     tag_boosts = boost_by_tag_cooccurrence(results)
     seen_domains = set()
-
     final = []
+
     for r in results:
         if not r.get("duration"):
             continue
-
         dur_secs = duration_to_seconds(r["duration"])
         if not (min_duration <= dur_secs <= max_duration):
             continue
@@ -246,7 +236,6 @@ def translate_text(text, target="en"):
 def duration_to_seconds(duration_str: str):
     if not duration_str or not isinstance(duration_str, str):
         return 0
-
     parts = duration_str.strip().split(":")
     try:
         parts = [int(p) for p in parts]
@@ -268,7 +257,6 @@ def duration_to_seconds(duration_str: str):
 
 def extract_tags(text: str, top_n: int = 10):
     clean = re.sub(r"[^a-zA-Z0-9\s]", "", text).lower()
-
     raw_results = extract_keywords(clean, diversity=0.7, top_n=top_n)
 
     if raw_results and isinstance(raw_results[0], list):
@@ -327,7 +315,6 @@ async def fetch_rendered_html_playwright(url, timeout=90000):
     browser = None
     try:
         os.makedirs("screenshots", exist_ok=True)
-
         async with async_playwright() as p:
             try:
                 browser = await p.chromium.launch(
@@ -363,13 +350,10 @@ async def fetch_rendered_html_playwright(url, timeout=90000):
                 await page.wait_for_load_state("networkidle")
                 await auto_bypass_consent_dialog(page)
                 html = await page.content()
-
                 return html
-
             except Exception as e:
                 print(f"[PLAYWRIGHT ERROR] Failed to load {url}: {e}")
                 return ""
-
     except Exception as e:
         print(f"[PLAYWRIGHT FATAL] {url}: {e}")
         return ""
@@ -419,7 +403,6 @@ def extract_content(html):
 async def auto_bypass_consent_dialog(page):
     try:
         await page.wait_for_timeout(1000)
-
         selectors = [
             "text=Enter",
             "text=I Agree",
@@ -433,7 +416,6 @@ async def auto_bypass_consent_dialog(page):
             "button:has-text('Got it')",
             "button:has-text('Agree')",
         ]
-
         for selector in selectors:
             element = await page.query_selector(selector)
             if element:
@@ -447,7 +429,6 @@ async def auto_bypass_consent_dialog(page):
 
 async def extract_metadata(html):
     soup = BeautifulSoup(html, "lxml")
-
     title = (
         soup.title.string if soup.title and isinstance(soup.title.string, str) else ""
     )
@@ -475,7 +456,6 @@ async def extract_metadata(html):
     }
 
 
-# === 🔍 SEARCH PIPELINE ===
 def auto_generate_tags_from_text(text, top_k=5):
     return [kw for kw, _ in extract_keywords(text, diversity=0.7, top_n=top_k)]
 
@@ -483,24 +463,18 @@ def auto_generate_tags_from_text(text, top_k=5):
 def extract_video_candidate_links(html: str, base_url: str):
     soup = BeautifulSoup(html, "lxml")
     urls = set()
-
     for a in soup.find_all("a", href=True):
         if not isinstance(a, Tag):
             continue
-
         href = str(a["href"])
         full_url = urljoin(base_url, href).split("?")[0].split("#")[0]
-
         if not is_valid_link(full_url):
             continue
-
         if is_probable_video_url(full_url) or href.lower().endswith(
             (".mp4", ".webm", ".m3u8")
         ):
             urls.add(full_url)
-
     print(f"[DEBUG] Deep candidate links from homepage: {len(urls)}")
-
     return list(urls)[:20]
 
 
@@ -511,24 +485,19 @@ def extract_video_sources(html, base_url):
     for tag in soup.find_all(["video", "source"]):
         if not isinstance(tag, Tag):
             continue
-
-        srcs = [
-            tag.get("src"),
-            tag.get("data-src"),
-            tag.get("data-hd-src"),
-            tag.get("data-video-url"),
-            tag.get("data-mp4"),
-            tag.get("data-webm"),
-        ]
-
-        for src in srcs:
-            if not src:
-                continue
-
-            full_url = urljoin(base_url, str(src))
-
-            if re.search(r"\.(mp4|webm|m3u8|mov)(\?.*)?$", full_url, re.IGNORECASE):
-                sources.add(full_url)
+        for src_attr in [
+            "src",
+            "data-src",
+            "data-hd-src",
+            "data-video-url",
+            "data-mp4",
+            "data-webm",
+        ]:
+            src = tag.get(src_attr)
+            if src:
+                full_url = urljoin(base_url, str(src))
+                if re.search(r"\.(mp4|webm|m3u8|mov)(\?.*)?$", full_url, re.IGNORECASE):
+                    sources.add(full_url)
 
     for iframe in soup.find_all("iframe", src=True):
         if not isinstance(iframe, Tag):
@@ -539,69 +508,39 @@ def extract_video_sources(html, base_url):
             or "embed" in src
             or any(ext in src for ext in ["mp4", "m3u8"])
         ):
-            full_url = urljoin(base_url, str(src))
-            sources.add(full_url)
+            sources.add(urljoin(base_url, str(src)))
 
     for script in soup.find_all("script"):
-        try:
-            if not isinstance(script, Tag) or not script.string:
-                continue
+        if not isinstance(script, Tag) or not script.string:
+            continue
+        matches = re.findall(
+            r'(https?://[^\s\'"]+\.(?:mp4|webm|m3u8|mov))', script.string
+        )
+        sources.update(urljoin(base_url, m) for m in matches)
 
-            jw_match = re.search(
-                r'jwplayer\(["\'].*?["\']\)\.setup\(\{.*?file\s*:\s*["\'](https?[^"\']+\.(?:mp4|webm|m3u8|mov))["\']',
-                script.string,
-                re.DOTALL,
-            )
-            if jw_match:
-                sources.add(jw_match.group(1))
+        jw_match = re.search(
+            r'jwplayer\(["\'].*?["\']\)\.setup\(\{.*?file\s*:\s*["\'](https?[^"\']+\.(?:mp4|webm|m3u8|mov))["\']',
+            script.string,
+            re.DOTALL,
+        )
+        if jw_match:
+            sources.add(jw_match.group(1))
 
-            file_matches = re.findall(
+        file_matches = re.findall(
+            r'["\']file["\']\s*:\s*["\'](https?://[^\s\'"]+\.(?:mp4|webm|m3u8|mov))["\']',
+            script.string,
+        )
+        sources.update(file_matches)
+
+        list_matches = re.findall(
+            r'["\']sources["\']\s*:\s*\[(.*?)\]', script.string, re.DOTALL
+        )
+        for group in list_matches:
+            nested_files = re.findall(
                 r'["\']file["\']\s*:\s*["\'](https?://[^\s\'"]+\.(?:mp4|webm|m3u8|mov))["\']',
-                script.string,
+                group,
             )
-            for match in file_matches:
-                sources.add(match)
-
-            list_matches = re.findall(
-                r'["\']sources["\']\s*:\s*\[(.*?)\]',
-                script.string,
-                re.DOTALL,
-            )
-            for group in list_matches:
-                nested_files = re.findall(
-                    r'["\']file["\']\s*:\s*["\'](https?://[^\s\'"]+\.(?:mp4|webm|m3u8|mov))["\']',
-                    group,
-                )
-                sources.update(nested_files)
-
-        except Exception as e:
-            print(f"[SCRIPT PARSE ERROR] {e}")
-            continue
-
-        try:
-            if "file" in script.string or "sources" in script.string:
-                json_like = re.findall(
-                    r'["\']file["\']\s*:\s*["\'](https?://[^\s\'"]+)', script.string
-                )
-                for match in json_like:
-                    if re.search(r"\.(mp4|webm|m3u8|mov)", match):
-                        full_url = urljoin(base_url, match)
-                        sources.add(full_url)
-        except Exception:
-            continue
-
-    for script in soup.find_all("script"):
-        try:
-            if not isinstance(script, Tag) or not isinstance(script.string, str):
-                continue
-            matches = re.findall(
-                r'(https?://[^\s\'"]+\.(?:mp4|webm|m3u8|mov))', script.string
-            )
-            for match in matches:
-                full_url = urljoin(base_url, match)
-                sources.add(full_url)
-        except Exception:
-            continue
+            sources.update(nested_files)
 
     if sources:
         print(f"[EXTRACTED] Found {len(sources)} video URLs")
@@ -619,13 +558,10 @@ async def extract_video_metadata(url, query_embed):
         return None
 
     video_links = extract_video_sources(html, url)
-    if video_links:
-        print(f"[DEBUG] Extracted {len(video_links)} video links from {url}")
-    else:
-        print(f"[DEBUG] No direct video links, trying to expand from homepage: {url}")
+
+    if not video_links:
         candidate_links = extract_video_candidate_links(html, url)
         ranked_links = rank_deep_links(candidate_links, query_embed)
-
         for deep_url in ranked_links[:5]:
             deep_html = await fetch_rendered_html_playwright(deep_url)
             if (
@@ -633,27 +569,16 @@ async def extract_video_metadata(url, query_embed):
                 or "Page not found" in deep_html
                 or re.search(r"\b(error|fail|unavailable)\b", deep_html, re.I)
             ):
-                print(f"[DEBUG] Deep link HTML at {deep_url} looks fake or minimal")
                 continue
-
             deep_sources = extract_video_sources(deep_html, deep_url)
             if deep_sources:
-                print(
-                    f"[DEBUG] Found {len(deep_sources)} videos in deep link: {deep_url}"
-                )
                 html = deep_html
                 url = deep_url
                 video_links = deep_sources
                 break
 
     soup = BeautifulSoup(html, "lxml")
-    video_elements = soup.find_all(["video", "source"])
-    print(
-        f"[DEBUG] HTML from {url} contains {len(video_elements)} <video>/<source> tags"
-    )
-    print(f"[DEBUG] Found {len(video_links)} video sources at {url}")
     deep_links = rank_deep_links(extract_video_candidate_links(html, url), query_embed)
-    print(f"[DEBUG] Deep links from {url}: {len(deep_links)}")
 
     for deep_url in deep_links[:5]:
         deep_html = await fetch_rendered_html_playwright(deep_url)
@@ -663,9 +588,7 @@ async def extract_video_metadata(url, query_embed):
             and "</html>" in deep_html
             and len(deep_html) < 1000
         ):
-            print(f"[DEBUG] Deep link HTML at {deep_url} looks fake or minimal")
             continue
-
         if (
             re.search(r"\.(mp4|webm|m3u8|mov)", deep_html, re.IGNORECASE)
             or "<video" in deep_html
@@ -701,7 +624,7 @@ async def extract_video_metadata(url, query_embed):
 
     meta = await extract_metadata(html)
     tags = auto_generate_tags_from_text(f"{text.strip()} {meta['title']}", top_k=10)
-    result = {
+    return {
         "url": url,
         "video_links": video_links,
         "title": meta["title"] or urlparse(url).netloc,
@@ -710,12 +633,8 @@ async def extract_video_metadata(url, query_embed):
         "score": 0.0,
     }
 
-    if not result["video_links"]:
-        print(f"[DEBUG] No video sources found at {url}")
 
-    return result
-
-
+# === 🔍 SEARCH PIPELINE ===
 async def search_engine_async(query, link_count):
     payload = {"q": query, "format": "json", "language": "en"}
     async with ClientSession(timeout=timeout_obj) as session:
@@ -750,15 +669,12 @@ async def search_videos_async(query):
                 result = await asyncio.wait_for(
                     extract_video_metadata(url, query_embed), timeout=60
                 )
-
                 if not result or not result.get("video_links"):
                     print(f"[WORKER] No usable result for: {url}")
                     return None
-
                 processed.add(url)
                 print(f"[WORKER] Completed: {url}")
                 return result
-
             except asyncio.TimeoutError:
                 print(f"[WORKER TIMEOUT] {url}")
                 return None
@@ -774,7 +690,6 @@ async def search_videos_async(query):
         elapsed = time.monotonic() - start_time
         if int(elapsed) % 10 == 0:
             print(f"[LOOP] {len(results)} results so far after {int(elapsed)}s")
-
         if elapsed > max_time:
             print("[LOOP] Max time reached, exiting loop.")
             break
@@ -832,7 +747,7 @@ async def search_videos_async(query):
     return results
 
 
-# === 🌐 FASTAPI ROUTES ===
+# === 🚀 FASTAPI ROUTES ===
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     async def auto_flush_loop():
@@ -861,7 +776,6 @@ async def search(query: str = "", power_scraping: bool = False):
     print(
         "----------------------------------------------------------------------------------------------------"
     )
-
     global VIDEOS_TO_SEARCH, VIDEO_RESULTS_LIMIT
 
     if power_scraping:
