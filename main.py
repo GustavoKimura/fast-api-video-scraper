@@ -1,5 +1,5 @@
 # === 📦 IMPORTS ===
-import os, random, hashlib, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura
+import os, random, hashlib, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json
 from urllib.parse import urlparse, urlunparse, urljoin
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -18,6 +18,7 @@ from collections import defaultdict, Counter
 from typing import List, Tuple
 from itertools import combinations
 from difflib import SequenceMatcher
+from playwright_stealth import stealth_async
 
 
 # === 🔒 DOMAIN CONCURRENCY CONTROL ===
@@ -332,11 +333,15 @@ def boost_by_tag_cooccurrence(results):
 
 def is_probable_video_url(url: str) -> bool:
     url = url.lower()
-    return any(hint in url for hint in VIDEO_HINTS)
+    return (
+        any(hint in url for hint in VIDEO_HINTS)
+        or bool(re.search(r"/video\d+", url))
+        or "viewkey=" in url
+    )
 
 
 # === 🌐 RENDER + EXTRACT ===
-async def fetch_rendered_html_playwright(url, timeout=30000):
+async def fetch_rendered_html_playwright(url, timeout=60000):
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -358,8 +363,6 @@ async def fetch_rendered_html_playwright(url, timeout=30000):
             page = await context.new_page()
 
             try:
-                from playwright_stealth import stealth_async
-
                 await stealth_async(page)
             except:
                 pass
@@ -370,12 +373,21 @@ async def fetch_rendered_html_playwright(url, timeout=30000):
             for _ in range(5):
                 await page.mouse.wheel(0, 1500)
                 await page.wait_for_timeout(1000)
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(2000)
 
             try:
                 await page.wait_for_selector("video", timeout=5000)
+                await page.wait_for_selector("iframe[src*='embed']", timeout=5000)
+                await page.wait_for_selector(
+                    "script[type='application/ld+json']", timeout=5000
+                )
             except:
                 print(f"[DEBUG] No <video> found in initial viewport for {url}")
 
+            await page.wait_for_selector(
+                "a[href*='video'], a[href*='view']", timeout=5000
+            )
             await page.wait_for_load_state("networkidle")
             await page.mouse.wheel(0, 5000)
             await page.wait_for_timeout(2000)
@@ -383,8 +395,18 @@ async def fetch_rendered_html_playwright(url, timeout=30000):
             await page.wait_for_timeout(5000)
 
             html = await page.content()
+
+            if "document.location" in html.lower() or "redirecting" in html.lower():
+                print(f"[WARNING] JavaScript redirect trap on {url}")
+                return ""
+
+            if "cf-challenge" in html or "captcha" in html.lower():
+                print(f"[WARNING] Possible anti-bot wall on {url}")
+
             if not html.strip():
                 print(f"[DEBUG] Empty HTML from {url}")
+                return ""
+
             return html
 
     except Exception as e:
@@ -484,16 +506,28 @@ def extract_deep_links(html: str, base_url: str) -> list[str]:
         if not isinstance(a, Tag):
             continue
 
-        href = a["href"]
-        full_url = urljoin(base_url, str(href))
+        href = str(a["href"])
+        full_url = urljoin(base_url, href).split("?")[0].split("#")[0]
 
         if not is_valid_link(full_url):
             continue
 
-        if is_probable_video_url(full_url):
+        if get_main_domain(full_url) != get_main_domain(base_url):
+            continue
+
+        if (
+            "/view" in full_url
+            or "/video" in full_url
+            or "viewkey=" in full_url
+            or re.search(r"/(watch|embed|v)/", full_url)
+        ):
             urls.add(full_url)
 
-    return list(urls)[:10]
+    print("[DEBUG] Deep candidate links from homepage:")
+    for link in sorted(urls):
+        print("  -", link)
+
+    return list(urls)[:20]
 
 
 def extract_video_sources(html, base_url):
@@ -503,18 +537,21 @@ def extract_video_sources(html, base_url):
     for tag in soup.find_all(["video", "source"]):
         if not isinstance(tag, Tag):
             continue
-        print(f"[DEBUG] Raw video tag: {str(tag)}")
-        src = (
-            tag.get("src")
-            or tag.get("data-src")
-            or tag.get("data-hd-src")
-            or tag.get("data-video-url")
-            or ""
-        )
-        if src:
-            full_url = urljoin(base_url, str(src))
-            if re.search(r"\.(mp4|webm|m3u8|mov)", full_url):
-                sources.add(full_url)
+
+        srcs = [
+            tag.get("src"),
+            tag.get("data-src"),
+            tag.get("data-hd-src"),
+            tag.get("data-video-url"),
+            tag.get("data-mp4"),
+            tag.get("data-webm"),
+        ]
+
+        for src in srcs:
+            if src:
+                full_url = urljoin(base_url, str(src))
+                if re.search(r"\.(mp4|webm|m3u8|mov)", full_url):
+                    sources.add(full_url)
 
     for iframe in soup.find_all("iframe", src=True):
         if not isinstance(iframe, Tag):
@@ -525,29 +562,36 @@ def extract_video_sources(html, base_url):
             or "embed" in src
             or any(ext in src for ext in ["mp4", "m3u8"])
         ):
-            sources.add(urljoin(base_url, str(src)))
+            full_url = urljoin(base_url, str(src))
+            sources.add(full_url)
 
     for script in soup.find_all("script", type="application/ld+json"):
         try:
-            if not isinstance(script, Tag):
+            if not isinstance(script, Tag) or not isinstance(script.string, str):
                 continue
-
-            if not isinstance(script.string, str):
-                continue
-
-            if "video_files" in script.string or "video_url" in script.string:
-                print("[DEBUG] Possible embedded video JSON found")
-
-            import json
-
             data = json.loads(script.string)
-
             if isinstance(data, dict) and data.get("@type") == "VideoObject":
                 url = data.get("contentUrl") or data.get("embedUrl")
                 if url and re.search(r"\.(mp4|webm|m3u8|mov)", url):
                     sources.add(url)
-        except:
+        except Exception:
             continue
+
+    for script in soup.find_all("script"):
+        try:
+            if not isinstance(script, Tag) or not isinstance(script.string, str):
+                continue
+            matches = re.findall(
+                r'(https?://[^\s"\']+\.(?:mp4|webm|m3u8|mov))', script.string
+            )
+            for match in matches:
+                full_url = urljoin(base_url, match)
+                sources.add(full_url)
+        except Exception:
+            continue
+
+    if sources:
+        print(f"[EXTRACTED] Found {len(sources)} video URLs: {sources}")
 
     return list(dict.fromkeys(sorted(sources)))
 
@@ -555,9 +599,39 @@ def extract_video_sources(html, base_url):
 async def process_url_async(url, query_embed):
     if not is_valid_link(url):
         return None
+
     html = await fetch_rendered_html_playwright(url)
+    if not html.strip():
+        print(f"[ERROR] No HTML content fetched from {url}")
+        return None
+
     print(f"[DEBUG] HTML length from {url}: {len(html)}")
     video_links = extract_video_sources(html, url)
+    if not video_links:
+        print(f"[DEBUG] Trying to expand from homepage: {url}")
+        candidate_links = extract_deep_links(html, url)
+        ranked_links = rank_deep_links(candidate_links, query_embed)
+
+        for deep_url in ranked_links[:5]:
+            deep_html = await fetch_rendered_html_playwright(deep_url)
+            if (
+                not deep_html
+                or "<html" in deep_html
+                and "</html>" in deep_html
+                and len(deep_html) < 1000
+            ):
+                print(f"[DEBUG] Deep link HTML at {deep_url} looks fake or minimal")
+                continue
+
+            deep_sources = extract_video_sources(deep_html, deep_url)
+            if deep_sources:
+                print(
+                    f"[DEBUG] Found {len(deep_sources)} videos in deep link: {deep_url}"
+                )
+                html = deep_html
+                url = deep_url
+                video_links = deep_sources
+                break
     soup = BeautifulSoup(html, "lxml")
     video_elements = soup.find_all(["video", "source"])
     print(
@@ -569,7 +643,13 @@ async def process_url_async(url, query_embed):
 
     for deep_url in deep_links[:5]:
         deep_html = await fetch_rendered_html_playwright(deep_url)
-        if not deep_html:
+        if (
+            not deep_html
+            or "<html" in deep_html
+            and "</html>" in deep_html
+            and len(deep_html) < 1000
+        ):
+            print(f"[DEBUG] Deep link HTML at {deep_url} looks fake or minimal")
             continue
 
         if (
@@ -580,22 +660,26 @@ async def process_url_async(url, query_embed):
             url = deep_url
             break
 
-    text = content_extractor.get_content(html)
-    print(f"[DEBUG] Extracted text length: {len(text)} from {url}")
+    try:
+        text = content_extractor.get_content(html)
+    except Exception as e:
+        print(f"[ERROR] boilerpy3 failed: {e}")
+        text = ""
+
     if len(text) < 200:
         try:
-            text = content_extractor.get_content(
-                BeautifulSoup(Document(html).summary(), "lxml").get_text("\n")
-            )
+            doc = Document(html)
+            text = doc.summary()
+            text = BeautifulSoup(text, "lxml").get_text("\n")
         except:
             text = ""
+
     if len(text) < 200:
-        try:
-            text = content_extractor.get_content(
-                BeautifulSoup(html, "lxml").get_text("\n")
-            )
-        except:
-            return None
+        text = extract_content(html)
+
+    if len(text) < 100:
+        print(f"[ERROR] Unable to extract usable text from {url}")
+        return None
 
     lang = detect_language(text)
     if lang != "en":
@@ -651,10 +735,14 @@ async def advanced_search_async(query):
         async with sem, domain_counters[domain]:
             try:
                 result = await asyncio.wait_for(
-                    process_url_async(url, query_embed), timeout=12
+                    process_url_async(url, query_embed), timeout=30
                 )
                 if not result:
                     print(f"[DEBUG] Failed to extract usable video from: {url}")
+                if result is None:
+                    print(f"[DEBUG] Skipping retry for: {url}")
+                    seen_hashes.add(url)
+                    return None
                 if result and result.get("hash") not in seen_hashes:
                     seen_hashes.add(result["hash"])
                     return result
@@ -725,6 +813,10 @@ def index():
 
 @app.get("/search")
 async def search(query: str = "", power_scraping: bool = False):
+    print(
+        "----------------------------------------------------------------------------------------------------"
+    )
+
     global LINKS_TO_SCRAP, SUMMARIES
 
     if power_scraping:
@@ -738,7 +830,9 @@ async def search(query: str = "", power_scraping: bool = False):
     results = await advanced_search_async(query)
 
     if not any(r.get("video_links") for r in results):
-        results = results[:5]
+        video_results = [r for r in results if r.get("video_links")]
+        print(f"[DEBUG] {len(video_results)} of {len(results)} had video_links")
+        results = video_results or results[:5]
     else:
         results = [r for r in results if r.get("video_links")]
 
