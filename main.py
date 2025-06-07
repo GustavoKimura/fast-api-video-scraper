@@ -10,12 +10,12 @@ from langdetect import DetectorFactory, detect
 from deep_translator import GoogleTranslator
 from aiohttp import ClientTimeout, ClientSession
 from keybert import KeyBERT
-from playwright.async_api import async_playwright
+from playwright.async_api import Browser, BrowserContext
 from boilerpy3 import extractors
 from numpy import dot, ndarray, zeros
 from numpy.linalg import norm
 from collections import defaultdict, Counter
-from typing import List, Tuple, Callable
+from typing import List, Tuple, Callable, cast
 from itertools import combinations
 from difflib import SequenceMatcher
 from playwright_stealth import stealth_async
@@ -106,6 +106,42 @@ content_extractor = extractors.LargestContentExtractor()
 SEARXNG_BASE_URL = "http://searxng:8080/search"
 client_session: ClientSession | None = None
 _session_lock = asyncio.Lock()
+_playwright_obj = None
+_playwright_browser: Browser | None = None
+_playwright_context: BrowserContext | None = None
+_browser_lock = asyncio.Lock()
+
+
+async def init_browser():
+    global _playwright_browser, _playwright_context, _playwright_obj
+
+    if not _playwright_browser or not _playwright_browser.is_connected():
+        _playwright_browser = None
+        _playwright_context = None
+
+    async with _browser_lock:
+        if _playwright_browser is None or _playwright_context is None:
+            from playwright.async_api import async_playwright
+
+            _playwright_obj = await async_playwright().start()
+            _playwright_browser = await _playwright_obj.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-web-security",
+                ],
+            )
+            _playwright_context = await _playwright_browser.new_context(
+                user_agent=get_user_agent(),
+                viewport={"width": 1280, "height": 720},
+                java_script_enabled=True,
+                bypass_csp=True,
+                locale="en-US",
+            )
+
+    return _playwright_context
 
 
 async def get_client_session():
@@ -638,227 +674,212 @@ async def fetch_rendered_html_playwright(
     if power_scraping:
         timeout = 900000
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-web-security",
-            ],
-        )
+    context = await init_browser()
 
-        async def _internal_fetch_with_playwright(url, timeout, browser):
-            html = ""
-            context = None
-            page = None
-            video_requests = []
+    async def _internal_fetch_with_playwright(url, timeout):
+        html = ""
+        page = None
+        video_requests = []
 
-            async def safe_evaluate(page, script, arg=None):
-                try:
-                    if page.is_closed():
-                        return None
-                    return (
-                        await page.evaluate(script, arg)
-                        if arg
-                        else await page.evaluate(script)
-                    )
-                except Exception as e:
-                    logging.error(f"SAFE EVAL ERROR - {e}")
+        async def safe_evaluate(page, script, arg=None):
+            try:
+                if page.is_closed():
                     return None
-
-            async def intercept_video_requests(route):
-                try:
-                    req_url = route.request.url
-                    if any(
-                        ext in req_url.lower()
-                        for ext in [
-                            ".mp4",
-                            ".webm",
-                            ".m3u8",
-                            ".ts",
-                            ".mov",
-                            ".mpd",
-                            "/get_file/",
-                            "/download/",
-                            "/hls/",
-                            "/flv/",
-                        ]
-                    ):
-                        if req_url not in video_requests:
-                            logging.debug(f"INTERCEPT - Video URL: {req_url}")
-                            video_requests.append(req_url)
-                    await route.continue_()
-                except Exception as e:
-                    if "closed" not in str(e):
-                        logging.warning(f"INTERCEPT ERROR - {e}")
-
-            try:
-                context = await browser.new_context(
-                    user_agent=get_user_agent(),
-                    viewport={"width": 1280, "height": 720},
-                    java_script_enabled=True,
-                    bypass_csp=True,
-                    locale="en-US",
+                return (
+                    await page.evaluate(script, arg)
+                    if arg
+                    else await page.evaluate(script)
                 )
-                await context.route("**/*", intercept_video_requests)
-                page = await context.new_page()
-
-                async def handle_stream_response(response):
-                    try:
-                        url = response.url.lower()
-                        if any(ext in url for ext in [".m3u8", ".ts", ".mpd"]):
-                            if url not in video_requests:
-                                logging.debug(f"STREAM RESPONSE - Found stream: {url}")
-                                video_requests.append(url)
-                    except Exception as e:
-                        logging.error(f"STREAM RESPONSE ERROR - {e}")
-
-                page.on(
-                    "response",
-                    lambda response: asyncio.create_task(
-                        handle_stream_response(response)
-                    ),
-                )
-                page.set_default_navigation_timeout(timeout)
-
-                try:
-                    await stealth_async(page)
-                except Exception as e:
-                    logging.info(f"STEALTH ERROR - {e}")
-
-                try:
-                    await page.goto(url, timeout=timeout)
-                    await safe_evaluate(
-                        page,
-                        """window.alert = () => {}; window.confirm = () => true;""",
-                    )
-                    await page.wait_for_load_state("domcontentloaded", timeout=timeout)
-                    await page.wait_for_timeout(2000)
-
-                    try:
-                        await page.click(
-                            "video, .thumb, .player, .video-thumb", timeout=3000
-                        )
-                        await page.wait_for_timeout(2000)
-                        logging.debug(
-                            "Clicked video/player element to trigger JS playback"
-                        )
-                    except Exception as e:
-                        logging.debug(
-                            f"No clickable player element found or failed to click: {e}"
-                        )
-
-                    try:
-                        await page.mouse.wheel(0, 1000)
-                        await page.wait_for_timeout(1000)
-                        logging.debug("Scrolled page to trigger lazy-load elements")
-                    except Exception as e:
-                        logging.debug(f"Scroll failed: {e}")
-
-                    try:
-                        await page.wait_for_selector(
-                            "video, source, iframe[src*='cdn'], script", timeout=5000
-                        )
-                    except Exception as e:
-                        logging.debug(
-                            f"No video/player selectors found during wait: {e}"
-                        )
-
-                    html = await page.content()
-                except Exception as e:
-                    logging.info(f"NAVIGATION ERROR - {url}: {e}")
-                    return "", []
-
-                try:
-                    await page.locator("video source").first.wait_for(timeout=8000)
-                except Exception:
-                    logging.info("No <video><source> found, proceeding anyway.")
-
-                await safe_evaluate(
-                    page,
-                    """() => {
-                        const fallbackClick = document.querySelector('video, .video-player, [data-video], .play-btn, .player');
-                        if (fallbackClick) {
-                            try { fallbackClick.click(); } catch (e) {}
-                        }
-                    }""",
-                )
-
-                await safe_evaluate(
-                    page,
-                    """() => {
-                        document.querySelectorAll('button, .play, .btn-play, .vjs-big-play-button')
-                        .forEach(el => { try { el.click(); } catch (e) {} });
-                    }""",
-                )
-                await page.wait_for_timeout(1500)
-                await safe_evaluate(
-                    page,
-                    """() => {
-                        const links = document.querySelectorAll('a[href*="/video"], a.thumbnail, a.video-thumb');
-                        for (const link of links) {
-                            try { link.click(); } catch (_) {}
-                        }
-                    }""",
-                )
-                await page.wait_for_timeout(1200)
-
-                last_height = await safe_evaluate(page, "document.body.scrollHeight")
-                for _ in range(5):
-                    await safe_evaluate(
-                        page, "window.scrollBy(0, document.body.scrollHeight)"
-                    )
-                    await page.wait_for_timeout(800)
-                    new_height = await safe_evaluate(page, "document.body.scrollHeight")
-                    if new_height == last_height:
-                        break
-                    last_height = new_height
-
-                await auto_bypass_consent_dialog(page)
-
-                content = extract_content(html)
-                del html
-
-            finally:
-                try:
-                    if context:
-                        await context.unroute("**/*")
-                except Exception as e:
-                    logging.error(f"UNROUTE ERROR - {e}")
-                try:
-                    if page and not page.is_closed():
-                        await page.close()
-                except Exception as e:
-                    logging.error(f"PAGE CLOSE ERROR - {e}")
-                try:
-                    if context:
-                        await context.close()
-                except Exception as e:
-                    logging.error(f"CONTEXT CLOSE ERROR - {e}")
-
-            return content, [
-                v for v in set(video_requests) if not v.startswith("blob:")
-            ]
-
-        for attempt in range(retries + 1):
-            try:
-                html, video_urls = await _internal_fetch_with_playwright(
-                    url, timeout + attempt * 15000, browser
-                )
-                if html and html.strip():
-                    return html, video_urls
             except Exception as e:
-                logging.warning(f"RETRY {attempt} - Error fetching {url}: {e}")
-            finally:
-                await asyncio.sleep(2 * (attempt + 1))
+                logging.error(f"SAFE EVAL ERROR - {e}")
+                return None
+
+        async def intercept_video_requests(route):
+            try:
+                req_url = route.request.url
+                if any(
+                    ext in req_url.lower()
+                    for ext in [
+                        ".mp4",
+                        ".webm",
+                        ".m3u8",
+                        ".ts",
+                        ".mov",
+                        ".mpd",
+                        "/get_file/",
+                        "/download/",
+                        "/hls/",
+                        "/flv/",
+                    ]
+                ):
+                    if req_url not in video_requests:
+                        logging.debug(f"INTERCEPT - Video URL: {req_url}")
+                        video_requests.append(req_url)
+                await route.continue_()
+            except Exception as e:
+                if "closed" not in str(e):
+                    logging.warning(f"INTERCEPT ERROR - {e}")
 
         try:
-            if browser:
-                await browser.close()
+            await context.route("**/*", intercept_video_requests)
+            page = await context.new_page()
+
+            async def handle_stream_response(response):
+                try:
+                    url = response.url.lower()
+                    if any(
+                        ext in url
+                        for ext in [
+                            ".m3u8",
+                            ".ts",
+                            ".mpd",
+                            ".mp4",
+                            ".webm",
+                            "stream",
+                            "cdn",
+                        ]
+                    ):
+                        if url not in video_requests:
+                            logging.debug(f"STREAM RESPONSE - Found stream: {url}")
+                            video_requests.append(url)
+                except Exception as e:
+                    logging.error(f"STREAM RESPONSE ERROR - {e}")
+
+            page.on(
+                "response",
+                lambda response: asyncio.create_task(handle_stream_response(response)),
+            )
+            page.set_default_navigation_timeout(timeout)
+
+            try:
+                await stealth_async(page)
+            except Exception as e:
+                logging.info(f"STEALTH ERROR - {e}")
+
+            try:
+                await page.goto(url, timeout=timeout)
+                await safe_evaluate(
+                    page,
+                    """window.alert = () => {}; window.confirm = () => true;""",
+                )
+                await page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                await page.wait_for_timeout(2000)
+
+                try:
+                    await page.click(
+                        "video, .thumb, .player, .video-thumb", timeout=3000
+                    )
+                    await page.wait_for_timeout(2000)
+                    logging.debug("Clicked video/player element to trigger JS playback")
+                except Exception as e:
+                    logging.debug(
+                        f"No clickable player element found or failed to click: {e}"
+                    )
+
+                try:
+                    await page.mouse.wheel(0, 1000)
+                    await page.wait_for_timeout(1000)
+                    logging.debug("Scrolled page to trigger lazy-load elements")
+                except Exception as e:
+                    logging.debug(f"Scroll failed: {e}")
+
+                try:
+                    await page.wait_for_selector(
+                        "video, source, iframe[src*='cdn'], script", timeout=5000
+                    )
+                except Exception as e:
+                    logging.debug(f"No video/player selectors found during wait: {e}")
+
+                html = await page.content()
+            except Exception as e:
+                logging.info(f"NAVIGATION ERROR - {url}: {e}")
+                return "", []
+
+            try:
+                await page.locator("video source").first.wait_for(timeout=8000)
+            except Exception:
+                logging.info("No <video><source> found, proceeding anyway.")
+
+            await safe_evaluate(
+                page,
+                """() => {
+                    const fallbackClick = document.querySelector('video, .video-player, [data-video], .play-btn, .player');
+                    if (fallbackClick) {
+                        try { fallbackClick.click(); } catch (e) {}
+                    }
+                }""",
+            )
+
+            await safe_evaluate(
+                page,
+                """() => {
+                    document.querySelectorAll('button, .play, .btn-play, .vjs-big-play-button')
+                    .forEach(el => { try { el.click(); } catch (e) {} });
+                }""",
+            )
+            await page.wait_for_timeout(1500)
+            await safe_evaluate(
+                page,
+                """() => {
+                    const links = document.querySelectorAll('a[href*="/video"], a.thumbnail, a.video-thumb');
+                    for (const link of links) {
+                        try { link.click(); } catch (_) {}
+                    }
+                }""",
+            )
+            await page.wait_for_timeout(1200)
+
+            last_height = await safe_evaluate(page, "document.body.scrollHeight")
+            for _ in range(5):
+                await safe_evaluate(
+                    page, "window.scrollBy(0, document.body.scrollHeight)"
+                )
+                await page.wait_for_timeout(800)
+                new_height = await safe_evaluate(page, "document.body.scrollHeight")
+                if new_height == last_height:
+                    break
+                last_height = new_height
+
+            await auto_bypass_consent_dialog(page)
+
+            await safe_evaluate(
+                page,
+                """() => {
+                    const blockers = document.querySelectorAll('[class*="overlay"], [class*="modal"], [id*="age"], .dialog-desktop-container');
+                    blockers.forEach(el => {
+                        el.style.display = 'none';
+                        el.style.pointerEvents = 'none';
+                        el.style.visibility = 'hidden';
+                        el.remove?.();
+                    });
+                }""",
+            )
+
+            content = extract_content(html)
+            del html
+
+        finally:
+            await context.unroute("**/*")
+
+            try:
+                if page and not page.is_closed():
+                    await page.close()
+            except Exception as e:
+                logging.error(f"PAGE CLOSE ERROR - {e}")
+
+        return content, [v for v in set(video_requests) if not v.startswith("blob:")]
+
+    for attempt in range(retries + 1):
+        try:
+            html, video_urls = await _internal_fetch_with_playwright(
+                url, timeout + attempt * 15000
+            )
+            if html and html.strip():
+                return html, video_urls
         except Exception as e:
-            logging.error(f"BROWSER CLOSE ERROR - {e}")
+            logging.warning(f"RETRY {attempt} - Error fetching {url}: {e}")
+        finally:
+            await asyncio.sleep(2 * (attempt + 1))
 
     return "", []
 
@@ -1133,7 +1154,14 @@ async def extract_video_sources(html, base_url, power_scraping):
 
     sorted_sources = sorted(
         sources,
-        key=lambda x: (".mp4" in x, ".webm" in x, ".m3u8" in x, ".ts" in x),
+        key=lambda x: (
+            ".mp4" in x,
+            ".webm" in x,
+            ".m3u8" in x,
+            ".ts" in x,
+            "cdn" in x,
+            "stream" in x,
+        ),
         reverse=True,
     )
 
@@ -1558,6 +1586,15 @@ async def lifespan(_: FastAPI):
         await flush_task
     except asyncio.CancelledError:
         pass
+
+    if _playwright_context:
+        await _playwright_context.close()
+
+    if _playwright_browser:
+        await _playwright_browser.close()
+
+    if _playwright_obj:
+        await _playwright_obj.stop()
 
 
 app = FastAPI(lifespan=lifespan)
