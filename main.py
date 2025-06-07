@@ -181,7 +181,7 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             continue
 
         if dur_secs <= 0:
-            score_penalty = 0.2
+            continue
         else:
             if not (min_duration <= dur_secs <= max_duration):
                 continue
@@ -333,44 +333,31 @@ async def get_video_duration(url: str, html: str = "") -> float:
             )
             stdout, _ = await proc.communicate()
             duration_str = stdout.decode().strip()
-            if not duration_str:
-                raise ValueError("Empty duration from ffprobe")
-            duration = float(duration_str)
-            if duration > 0:
-                return duration
+            if duration_str:
+                duration = float(duration_str)
+                if duration > 0:
+                    return duration
         except Exception as e:
             print(f"[FFPROBE ERROR] {url}: {e}")
-        duration = 0.0
 
-    if html:
-        try:
+    try:
+        if html:
             soup = BeautifulSoup(html, "lxml")
-            duration_meta = soup.find("meta", attrs={"property": "og:video:duration"})
-            if (
-                isinstance(duration_meta, Tag)
-                and duration_meta
-                and duration_meta.get("content")
-            ):
-                return float(str(duration_meta["content"]))
-        except Exception as e:
-            print(f"[META-DURATION ERROR] {url}: {e}")
+            meta = soup.find("meta", attrs={"property": "og:video:duration"})
+            if isinstance(meta, Tag) and meta and meta.get("content"):
+                return float(str(meta["content"]))
 
-    match = re.search(r"(\d+)[-_]?min", url.lower())
-    if match:
-        minutes = int(match.group(1))
-        return float(minutes * 60)
+        match = re.search(r'"duration"\s*:\s*"PT(\d+)M(\d+)S"', html)
+        if match:
+            minutes = int(match.group(1))
+            seconds = int(match.group(2))
+            return minutes * 60 + seconds
 
-    match = re.search(r'"duration"\s*:\s*"PT(\d+)M(\d+)S"', html)
-    if match:
-        minutes = int(match.group(1))
-        seconds = int(match.group(2))
-        return minutes * 60 + seconds
-
-    if duration == 0.0:
-        if "preview360p" in url.lower():
-            return 15.0
-        if "720p" in url.lower():
-            return 60.0
+        match = re.search(r"(\d+)[-_]?min", url.lower())
+        if match:
+            return int(match.group(1)) * 60
+    except Exception as e:
+        print(f"[FALLBACK DURATION ERROR] {url}: {e}")
 
     return 0.0
 
@@ -475,8 +462,11 @@ def boost_by_tag_cooccurrence(results):
 
 def is_probable_video_url(url: str):
     video_exts = (".mp4", ".webm", ".m3u8", ".mov")
-    parsed = urlparse(url)
-    path = parsed.path.lower()
+    non_video_exts = (".js", ".css", ".json", ".txt")
+
+    path = urlparse(url).path.lower()
+    if any(path.endswith(ext) for ext in non_video_exts):
+        return False
     return (
         any(path.endswith(ext) for ext in video_exts)
         and not get_main_domain(url).lower() in BLOCKED_DOMAINS
@@ -526,7 +516,9 @@ def clean_tag_text(tag):
 
 
 def normalize_tag(tag: str):
-    return clean_tag_text(re.sub(r"[^a-z0-9]", "", tag.lower()))
+    tag = clean_tag_text(re.sub(r"[^a-z0-9]", "", tag.lower()))
+    tag = re.sub(r"(consent|cookie|agree|explicit|adult|enter|age|18\+?)", "", tag)
+    return tag.strip()
 
 
 def normalize_tags(tags: list[str]):
@@ -541,7 +533,7 @@ async def deduplicate_videos(videos: list[dict]) -> list[dict]:
 
     tasks = {}
     for video in videos:
-        base = re.sub(r"[\-_](\d{3,4})[xX_](\d{3,4})[\-_]?\d*fps?", "", video["url"])
+        base = re.sub(r"\.(mp4|webm|m3u8|mov)$", "", video["url"].lower())
         key = (
             normalize_tag(video["title"]),
             frozenset(normalize_tags(video.get("tags", []))),
@@ -935,7 +927,7 @@ async def extract_metadata(html, url):
 
 
 def auto_generate_tags_from_text(text, top_k=5):
-    raw = extract_keywords(text, diversity=0.7, top_n=top_k)
+    raw = extract_keywords(text, diversity=0.7, top_n=top_k * 2)
     flat: List[Tuple[str, float]] = []
 
     for item in raw:
@@ -946,16 +938,19 @@ def auto_generate_tags_from_text(text, top_k=5):
                 x for x in item if isinstance(x, tuple) and isinstance(x[0], str)
             )
 
-    return [
-        normalize_tag(kw)
-        for kw, _ in flat
+    tag_set = []
+    for kw, _ in flat:
+        if not kw:
+            continue
+        norm_kw = normalize_tag(kw)
         if (
-            isinstance(kw, str)
-            and is_sensible_keyword(kw)
-            and len(kw.split()) <= 4
-            and not any(bad in kw for bad in BAD_TAGS)
-        )
-    ]
+            is_sensible_keyword(kw)
+            and norm_kw not in BAD_TAGS
+            and not re.search(r"(consent|cookie|agree|explicit|age|18)", norm_kw)
+        ):
+            tag_set.append(norm_kw)
+
+    return tag_set[:top_k]
 
 
 def extract_video_candidate_links(html: str, base_url: str):
