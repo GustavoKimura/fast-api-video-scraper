@@ -107,6 +107,14 @@ VIDEO_HINTS = [
     "/file/",
     "/stream/",
     "/content/video/",
+    "streaming",
+    "mediafile",
+    "video-player",
+    "file.mp4",
+    "embed",
+    "watch",
+    "contentUrl",
+    "/files/",
 ]
 
 
@@ -331,12 +339,15 @@ def boost_by_tag_cooccurrence(results):
     return tag_boosts
 
 
-def is_probable_video_url(url: str) -> bool:
+def is_probable_video_url(url: str):
     url = url.lower()
     return (
-        any(hint in url for hint in VIDEO_HINTS)
-        or bool(re.search(r"/video\d+", url))
-        or "viewkey=" in url
+        any(ext in url for ext in [".mp4", ".webm", ".m3u8", ".mov"])
+        or any(
+            kw in url
+            for kw in ["video", "watch", "play", "stream", "embed", "cdn", "media"]
+        )
+        or bool(re.search(r"/\d{4,}/[^/]+/?$", url))
     )
 
 
@@ -403,8 +414,8 @@ async def fetch_rendered_html_playwright(url, timeout=60000):
 
             await page.wait_for_load_state("networkidle")
 
-            for _ in range(5):
-                await page.mouse.wheel(0, 1500)
+            for _ in range(10):
+                await page.mouse.wheel(0, 2500)
                 await page.wait_for_timeout(1000)
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await page.wait_for_timeout(2000)
@@ -567,14 +578,8 @@ def extract_deep_links(html: str, base_url: str) -> list[str]:
         if not is_valid_link(full_url):
             continue
 
-        if get_main_domain(full_url) != get_main_domain(base_url):
-            continue
-
-        if (
-            "viewkey=" in full_url
-            or re.search(r"/video\d+", full_url)
-            or re.search(r"/view_video\.php\?viewkey=", full_url)
-            or re.search(r"/watch/\d+", full_url)
+        if is_probable_video_url(full_url) or href.lower().endswith(
+            (".mp4", ".webm", ".m3u8")
         ):
             urls.add(full_url)
 
