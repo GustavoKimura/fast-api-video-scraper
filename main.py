@@ -554,14 +554,20 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
         video_requests = []
 
         async def intercept_video_requests(route):
-            req_url = route.request.url
-            if any(
-                ext in req_url.lower()
-                for ext in [".mp4", ".webm", ".m3u8", ".mov", ".ts"]
-            ):
-                print(f"[INTERCEPT] Video URL: {req_url}")
-                video_requests.append(req_url)
-            await route.continue_()
+            try:
+                req_url = route.request.url
+                if any(
+                    ext in req_url.lower()
+                    for ext in [".mp4", ".webm", ".m3u8", ".mov", ".ts"]
+                ):
+                    print(f"[INTERCEPT] Video URL: {req_url}")
+                    video_requests.append(req_url)
+                await route.continue_()
+            except Exception as e:
+                if "Target page, context or browser has been closed" in str(e):
+                    print("[ROUTE WARNING] Route skipped after page closed.")
+                else:
+                    print(f"[ROUTE ERROR] {e}")
 
         async with async_playwright() as p:
             try:
@@ -574,110 +580,129 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                         "--disable-web-security",
                     ],
                 )
-            except Exception as e:
-                print(f"[PLAYWRIGHT ERROR] Launch failed: {e}")
-                return ""
-
-            context = await browser.new_context(
-                user_agent=get_user_agent(),
-                viewport={"width": 1280, "height": 720},
-                java_script_enabled=True,
-                bypass_csp=True,
-                locale="en-US",
-            )
-            await context.route("**/*", intercept_video_requests)
-            page = await context.new_page()
-            page.set_default_navigation_timeout(timeout)
-
-            try:
-                await stealth_async(page)
-            except Exception as e:
-                print(f"[PLAYWRIGHT WARNING] Stealth failed: {e}")
-
-            try:
-                await page.goto(url, timeout=timeout)
-                await page.wait_for_load_state("domcontentloaded", timeout=timeout)
-            except Exception as e:
-                print(f"[NAVIGATION ERROR] {url}: {e}")
-                return ""
-
-            try:
-                await page.locator("video source").first.wait_for(timeout=8000)
-            except:
-                print("[INFO] No <source> tag found directly.")
-
-            try:
-                video_src = await page.evaluate(
-                    """() => {
-                    try {
-                        const sources = document.querySelectorAll("video source[src]");
-                        if (sources.length > 0) return sources[0].src;
-
-                        const scripts = Array.from(document.scripts).map(s => s.textContent).join("\\n");
-                        const match = scripts.match(/"file"\\s*:\\s*"([^"]+\\.(mp4|webm|m3u8))"/i);
-                        return match ? match[1] : null;
-                    } catch (e) {
-                        return null;
-                    }
-                }"""
+                context = await browser.new_context(
+                    user_agent=get_user_agent(),
+                    viewport={"width": 1280, "height": 720},
+                    java_script_enabled=True,
+                    bypass_csp=True,
+                    locale="en-US",
                 )
-                if video_src:
-                    await page.evaluate(
-                        """(videoSrc) => {
+                await context.route("**/*", intercept_video_requests)
+                page = await context.new_page()
+                page.set_default_navigation_timeout(timeout)
+
+                try:
+                    await stealth_async(page)
+                except Exception as e:
+                    print(f"[PLAYWRIGHT WARNING] Stealth failed: {e}")
+
+                try:
+                    await page.goto(url, timeout=timeout)
+                    await page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                except Exception as e:
+                    print(f"[NAVIGATION ERROR] {url}: {e}")
+                    return ""
+
+                try:
+                    await page.locator("video source").first.wait_for(timeout=8000)
+                except:
+                    print("[INFO] No <source> tag found directly.")
+
+                try:
+                    video_src = await page.evaluate(
+                        """() => {
                         try {
+                            const sources = document.querySelectorAll("video source[src]");
+                            if (sources.length > 0) return sources[0].src;
+
+                            const scripts = Array.from(document.scripts).map(s => s.textContent).join("\\n");
+                            const match = scripts.match(/"file"\\s*:\\s*"([^"]+\\.(mp4|webm|m3u8))"/i);
+                            return match ? match[1] : null;
+                        } catch (e) {
+                            return null;
+                        }
+                    }"""
+                    )
+                    if video_src:
+                        await page.evaluate(
+                            """(videoSrc) => {
+                            try {
+                                const v = document.createElement('video');
+                                const s = document.createElement('source');
+                                s.src = videoSrc;
+                                v.appendChild(s);
+                                document.body.appendChild(v);
+                            } catch (e) {
+                                console.error(e);
+                            }
+                        }""",
+                            video_src,
+                        )
+                        print(f"[JS VIDEO SRC] Injected src: {video_src}")
+                except Exception as e:
+                    print(f"[VIDEO JS ERROR] {e}")
+
+                try:
+                    await page.evaluate(
+                        """() => {
+                        document.querySelectorAll('button, .play, .video-play, .btn-play, .vjs-big-play-button, .player-button')
+                        .forEach(el => { try { el.click(); } catch (e) {} });
+                    }"""
+                    )
+                    await page.wait_for_timeout(1500)
+                except Exception as e:
+                    print(f"[CLICK SIMULATION ERROR] {e}")
+
+                for _ in range(3):
+                    try:
+                        await page.evaluate(
+                            "window.scrollBy(0, document.body.scrollHeight)"
+                        )
+                        await page.wait_for_timeout(800)
+                    except Exception:
+                        break
+
+                await auto_bypass_consent_dialog(page)
+
+                for v_url in set(video_requests):
+                    try:
+                        await page.evaluate(
+                            """(vUrl) => {
                             const v = document.createElement('video');
                             const s = document.createElement('source');
-                            s.src = videoSrc;
+                            s.src = vUrl;
                             v.appendChild(s);
                             document.body.appendChild(v);
-                        } catch (e) {
-                            console.error(e);
-                        }
-                    }""",
-                        video_src,
-                    )
-                    print(f"[JS VIDEO SRC] Injected src: {video_src}")
-            except Exception as e:
-                print(f"[VIDEO JS ERROR] {e}")
+                        }""",
+                            v_url,
+                        )
+                    except Exception as e:
+                        print(f"[VIDEO INJECT ERROR] {e}")
 
-            try:
-                await page.evaluate(
-                    """() => {
-                    document.querySelectorAll('button, .play, .video-play, .btn-play, .vjs-big-play-button, .player-button')
-                    .forEach(el => { try { el.click(); } catch (e) {} });
-                }"""
-                )
-                await page.wait_for_timeout(1500)
-            except Exception as e:
-                print(f"[CLICK SIMULATION ERROR] {e}")
-
-            for _ in range(3):
+            finally:
                 try:
-                    await page.evaluate(
-                        "window.scrollBy(0, document.body.scrollHeight)"
-                    )
-                    await page.wait_for_timeout(800)
-                except Exception:
-                    break
-
-            await auto_bypass_consent_dialog(page)
-
-            for v_url in set(video_requests):
-                try:
-                    await page.evaluate(
-                        """(vUrl) => {
-                        const v = document.createElement('video');
-                        const s = document.createElement('source');
-                        s.src = vUrl;
-                        v.appendChild(s);
-                        document.body.appendChild(v);
-                    }""",
-                        v_url,
-                    )
+                    if page in context.pages:
+                        await page.unroute_all(behavior="ignoreErrors")
                 except Exception as e:
-                    print(f"[VIDEO INJECT ERROR] {e}")
+                    print(f"[UNROUTE CLEANUP ERROR] {e}")
 
-            return await page.content()
+                try:
+                    if "context" in locals():
+                        await context.close()
+                except Exception:
+                    pass
+                try:
+                    if browser:
+                        await browser.close()
+                except Exception:
+                    pass
+
+                html = ""
+                try:
+                    html = await page.content()
+                except Exception as e:
+                    print(f"[CONTENT ERROR] Failed to fetch page content: {e}")
+                return html
 
     for attempt in range(retries + 1):
         try:
