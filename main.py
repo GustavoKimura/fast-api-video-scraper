@@ -317,7 +317,7 @@ def extract_tags(text: str, top_n: int = 10) -> List[Tuple[str, float]]:
 def boost_by_tag_cooccurrence(results):
     co_pairs = Counter()
     for r in results:
-        tags = list(set(r.get("tags", [])))
+        tags = list(set(tag.lower() for tag in r.get("tags", [])))
         for a, b in combinations(sorted(tags), 2):
             co_pairs[(a, b)] += 1
 
@@ -342,6 +342,7 @@ def is_probable_video_url(url: str) -> bool:
 
 # === 🌐 RENDER + EXTRACT ===
 async def fetch_rendered_html_playwright(url, timeout=60000):
+    browser = None
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -369,14 +370,39 @@ async def fetch_rendered_html_playwright(url, timeout=60000):
 
             await page.goto(url, timeout=timeout)
             try:
-                link = await page.query_selector("a[href*='view_video']")
-                if link:
-                    print("[DEBUG] Clicking into video subpage...")
-                    await link.click()
-                    await page.wait_for_load_state("networkidle")
-                    await page.wait_for_timeout(3000)
+                candidate_links = await page.query_selector_all("a[href]")
+                scored_links = []
+                for link in candidate_links:
+                    href = await link.get_attribute("href")
+                    if not href or not is_probable_video_url(href):
+                        continue
+                    text = await link.inner_text() or ""
+                    snippet = text.strip() or href.split("/")[-1]
+                    sim = cosine_sim(
+                        model_embed.encode(snippet), model_embed.encode(url)
+                    )
+                    scored_links.append((sim, urljoin(url, href)))
+                for _, best_link in scored_links[:3]:
+                    try:
+                        print(f"[AUTO-NAV] Trying video subpage: {best_link}")
+                        await page.goto(best_link, timeout=timeout)
+                        await page.wait_for_load_state("networkidle")
+                        html = await page.content()
+                        if any(
+                            t in html
+                            for t in (
+                                "<video",
+                                "jwplayer",
+                                "m3u8",
+                                ".mp4",
+                                "contentUrl",
+                            )
+                        ):
+                            return html
+                    except Exception as e:
+                        print(f"[AUTO-NAV] Failed to extract from {best_link}: {e}")
             except Exception as e:
-                print(f"[WARNING] Failed to click into video subpage: {e}")
+                print(f"[WARNING] Smart link follow failed: {e}")
 
             await page.wait_for_load_state("networkidle")
 
@@ -387,7 +413,7 @@ async def fetch_rendered_html_playwright(url, timeout=60000):
                 await page.wait_for_timeout(2000)
 
             try:
-                await page.wait_for_selector("video", timeout=5000)
+                await page.wait_for_selector("video", timeout=15000)
                 await page.wait_for_selector("iframe[src*='embed']", timeout=5000)
                 await page.wait_for_selector(
                     "script[type='application/ld+json']", timeout=5000
@@ -428,10 +454,11 @@ async def fetch_rendered_html_playwright(url, timeout=60000):
         print(f"[Playwright Error] {url}: {e}")
         return ""
     finally:
-        try:
-            await browser.close()
-        except:
-            pass
+        if browser:
+            try:
+                await browser.close()
+            except:
+                pass
 
 
 def preprocess_html(html):
@@ -595,12 +622,24 @@ def extract_video_sources(html, base_url):
         except Exception:
             continue
 
+        try:
+            if "file" in script.string or "sources" in script.string:
+                json_like = re.findall(
+                    r'["\']file["\']\s*:\s*["\'](https?://[^\s\'"]+)', script.string
+                )
+                for match in json_like:
+                    if re.search(r"\.(mp4|webm|m3u8|mov)", match):
+                        full_url = urljoin(base_url, match)
+                        sources.add(full_url)
+        except Exception:
+            continue
+
     for script in soup.find_all("script"):
         try:
             if not isinstance(script, Tag) or not isinstance(script.string, str):
                 continue
             matches = re.findall(
-                r'(https?:\/\/[^"\']+\.(?:mp4|webm|m3u8|mov))', script.string
+                r'(https?://[^\s\'"]+\.(?:mp4|webm|m3u8|mov))', script.string
             )
             for match in matches:
                 full_url = urljoin(base_url, match)
@@ -633,10 +672,9 @@ async def process_url_async(url, query_embed):
         for deep_url in ranked_links[:5]:
             deep_html = await fetch_rendered_html_playwright(deep_url)
             if (
-                not deep_html
-                or "<html" in deep_html
-                and "</html>" in deep_html
-                and len(deep_html) < 1000
+                "404" in deep_html
+                or "Page not found" in deep_html
+                or re.search(r"\b(error|fail|unavailable)\b", deep_html, re.I)
             ):
                 print(f"[DEBUG] Deep link HTML at {deep_url} looks fake or minimal")
                 continue
