@@ -1,5 +1,5 @@
 # === 📦 IMPORTS ===
-import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json
+import os, random, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura, json, base64
 from urllib.parse import urlparse, urlunparse, urljoin
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -563,16 +563,15 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
         video_requests = []
 
         async def intercept_video_requests(route):
-            html = ""
-
             try:
                 req_url = route.request.url
                 if any(
                     ext in req_url.lower()
-                    for ext in [".mp4", ".webm", ".m3u8", ".mov", ".ts"]
+                    for ext in [".mp4", ".webm", ".m3u8", ".ts", ".mov"]
                 ):
-                    print(f"[INTERCEPT] Video URL: {req_url}")
-                    video_requests.append(req_url)
+                    if req_url not in video_requests:
+                        print(f"[INTERCEPT] Video URL: {req_url}")
+                        video_requests.append(req_url)
                 await route.continue_()
             except Exception as e:
                 if "Target page, context or browser has been closed" in str(e):
@@ -600,6 +599,23 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                 )
                 await context.route("**/*", intercept_video_requests)
                 page = await context.new_page()
+                page.on(
+                    "response",
+                    lambda response: asyncio.create_task(
+                        handle_stream_response(response, video_requests)
+                    ),
+                )
+
+                async def handle_stream_response(response, video_requests):
+                    try:
+                        url = response.url.lower()
+                        if any(ext in url for ext in [".m3u8", ".ts", ".mpd"]):
+                            if url not in video_requests:
+                                print(f"[STREAM RESPONSE] Found video stream: {url}")
+                                video_requests.append(url)
+                    except Exception as e:
+                        print(f"[STREAM RESPONSE ERROR] {e}")
+
                 page.set_default_navigation_timeout(timeout)
 
                 try:
@@ -609,6 +625,9 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
 
                 try:
                     await page.goto(url, timeout=timeout)
+                    await page.evaluate(
+                        """window.alert = () => {}; window.confirm = () => true;"""
+                    )
                     await page.wait_for_load_state("domcontentloaded", timeout=timeout)
                 except Exception as e:
                     print(f"[NAVIGATION ERROR] {url}: {e}")
@@ -661,17 +680,60 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                     }"""
                     )
                     await page.wait_for_timeout(1500)
+
+                    try:
+                        video_url = await page.evaluate(
+                            """
+                        () => {
+                            const vid = document.querySelector("video");
+                            if (vid) {
+                                return vid.currentSrc || vid.src || (vid.querySelector("source")?.src) || null;
+                            }
+                            return null;
+                        }
+                        """
+                        )
+                        try:
+                            uses_mse = await page.evaluate(
+                                "() => !!(window.MediaSource && typeof window.MediaSource === 'function')"
+                            )
+                            if uses_mse:
+                                print("[MEDIA SOURCE] Detected use of MediaSource API")
+                                blob_url = await page.evaluate(
+                                    """
+                                    () => {
+                                        const vids = document.querySelectorAll("video");
+                                        for (const vid of vids) {
+                                            if (vid.src.startsWith("blob:")) return vid.src;
+                                        }
+                                        return null;
+                                    }
+                                    """
+                                )
+                                if blob_url:
+                                    print(
+                                        f"[BLOB URL DETECTED] {blob_url} (not downloadable)"
+                                    )
+                        except Exception as e:
+                            print(f"[MEDIA SOURCE CHECK ERROR] {e}")
+                        if video_url and video_url not in video_requests:
+                            print(f"[VIDEO FOUND] JS-evaluated video URL: {video_url}")
+                            video_requests.append(video_url)
+                    except Exception as e:
+                        print(f"[VIDEO EVALUATE ERROR] {e}")
                 except Exception as e:
                     print(f"[CLICK SIMULATION ERROR] {e}")
 
-                for _ in range(3):
-                    try:
-                        await page.evaluate(
-                            "window.scrollBy(0, document.body.scrollHeight)"
-                        )
-                        await page.wait_for_timeout(800)
-                    except Exception:
+                last_height = await page.evaluate("document.body.scrollHeight")
+                for _ in range(5):
+                    await page.evaluate(
+                        "window.scrollBy(0, document.body.scrollHeight)"
+                    )
+                    await page.wait_for_timeout(800)
+                    new_height = await page.evaluate("document.body.scrollHeight")
+                    if new_height == last_height:
                         break
+                    last_height = new_height
 
                 await auto_bypass_consent_dialog(page)
 
@@ -877,7 +939,7 @@ def extract_video_candidate_links(html: str, base_url: str):
     return list(urls)[:20]
 
 
-def extract_video_sources(html, base_url):
+async def extract_video_sources(html, base_url):
     soup = BeautifulSoup(html, "lxml")
     sources = set()
 
@@ -901,13 +963,15 @@ def extract_video_sources(html, base_url):
     for iframe in soup.find_all("iframe", src=True):
         if not isinstance(iframe, Tag):
             continue
-        src = iframe["src"]
-        if (
-            "player" in src
-            or "embed" in src
-            or any(ext in src for ext in ["mp4", "m3u8"])
-        ):
-            sources.add(urljoin(base_url, str(src)))
+        src = iframe.get("src", "")
+        if src and ("player" in src or "embed" in src):
+            iframe_url = urljoin(base_url, str(src))
+            try:
+                iframe_html = await fetch_rendered_html_playwright(iframe_url)
+                nested_sources = await extract_video_sources(iframe_html, iframe_url)
+                sources.update(nested_sources)
+            except Exception as e:
+                print(f"[IFRAME RECURSION ERROR] {iframe_url}: {e}")
 
     for script in soup.find_all("script"):
         if not isinstance(script, Tag) or not script.string:
@@ -988,7 +1052,9 @@ async def extract_video_metadata(url, query_embed):
         print(f"[ERROR] No HTML content fetched from {url}")
         return None
 
-    video_links = extract_video_sources(html, url)
+    video_links = await extract_video_sources(html, url)
+    candidate_links = []
+
     if not video_links:
         candidate_links = extract_video_candidate_links(html, url)
         if not candidate_links:
@@ -1004,12 +1070,32 @@ async def extract_video_metadata(url, query_embed):
                 or re.search(r"\b(error|fail|unavailable)\b", deep_html, re.I)
             ):
                 continue
-            deep_sources = extract_video_sources(deep_html, deep_url)
+            deep_sources = await extract_video_sources(deep_html, deep_url)
             if deep_sources:
                 html = deep_html
                 url = deep_url
                 video_links = deep_sources
                 break
+
+    soup = BeautifulSoup(html, "lxml")
+    for script in soup.find_all("script"):
+        if not isinstance(script, Tag):
+            continue
+
+        script_text = getattr(script, "string", None)
+        if not script_text:
+            continue
+
+        matches = re.findall(r'atob\(["\']([^"\']+)["\']\)', script_text)
+        for b64 in matches:
+            try:
+                decoded = base64.b64decode(b64.strip()).decode("utf-8")
+                if decoded.startswith("http") and is_probable_video_url(decoded):
+                    if decoded not in video_links:
+                        print(f"[BASE64 VIDEO] Decoded and added: {decoded}")
+                        video_links.append(decoded)
+            except Exception:
+                continue
 
     try:
         text = content_extractor.get_content(html)
