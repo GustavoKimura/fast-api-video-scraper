@@ -7,7 +7,7 @@ ENV TORCH_HOME=/models
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libgtk-3-0 libxss1 libasound2 \
     libxcomposite1 libxdamage1 libxrandr2 libgbm1 libegl1 \
-    ca-certificates wget curl gnupg \
+    ca-certificates wget curl gnupg ffmpeg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
