@@ -188,6 +188,10 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             score_penalty = 0.0
 
         score = 0.0
+
+        if r.get("is_stream", False):
+            score *= 0.6
+
         if r.get("tags"):
             tag_text = " ".join(r["tags"])
             tag_embed = model_embed.encode(tag_text)
@@ -559,14 +563,31 @@ async def deduplicate_videos(videos: list[dict]) -> list[dict]:
 
 
 # === 🌐 RENDER + EXTRACT ===
-async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
+async def fetch_rendered_html_playwright(
+    url, timeout=150000, retries=2, power_scraping=False
+):
+    if power_scraping:
+        timeout = 900000
+
     async def _internal_fetch_with_playwright(url, timeout):
         html = ""
         browser = None
         context = None
         page = None
         video_requests = []
-        blob_urls = []
+
+        async def safe_evaluate(page, script, arg=None):
+            try:
+                if page.is_closed():
+                    return None
+                return (
+                    await page.evaluate(script, arg)
+                    if arg
+                    else await page.evaluate(script)
+                )
+            except Exception as e:
+                print(f"[SAFE EVAL ERROR] {e}")
+                return None
 
         async def intercept_video_requests(route):
             try:
@@ -605,12 +626,6 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                 )
                 await context.route("**/*", intercept_video_requests)
                 page = await context.new_page()
-                page.on(
-                    "response",
-                    lambda response: asyncio.create_task(
-                        handle_stream_response(response, video_requests)
-                    ),
-                )
 
                 async def handle_stream_response(response, video_requests):
                     try:
@@ -622,6 +637,12 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                     except Exception as e:
                         print(f"[STREAM RESPONSE ERROR] {e}")
 
+                page.on(
+                    "response",
+                    lambda response: asyncio.create_task(
+                        handle_stream_response(response, video_requests)
+                    ),
+                )
                 page.set_default_navigation_timeout(timeout)
 
                 try:
@@ -631,7 +652,8 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
 
                 try:
                     try:
-                        await page.goto(url, timeout=timeout)
+                        if not page.is_closed():
+                            await page.goto(url, timeout=timeout)
                     except Exception as e:
                         print(f"[NAVIGATION ERROR] {url}: {e}")
                         try:
@@ -643,8 +665,9 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                         except:
                             html = ""
                         return html
-                    await page.evaluate(
-                        """window.alert = () => {}; window.confirm = () => true;"""
+                    await safe_evaluate(
+                        page,
+                        """window.alert = () => {}; window.confirm = () => true;""",
                     )
                     await page.wait_for_load_state("domcontentloaded", timeout=timeout)
                 except Exception as e:
@@ -657,7 +680,8 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                     print("[INFO] No <source> tag found directly.")
 
                 try:
-                    video_src = await page.evaluate(
+                    video_src = await safe_evaluate(
+                        page,
                         """() => {
                         try {
                             const sources = document.querySelectorAll("video source[src]");
@@ -669,10 +693,11 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                         } catch (e) {
                             return null;
                         }
-                    }"""
+                    }""",
                     )
                     if video_src:
-                        await page.evaluate(
+                        await safe_evaluate(
+                            page,
                             """(videoSrc) => {
                             try {
                                 const v = document.createElement('video');
@@ -691,16 +716,18 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                     print(f"[VIDEO JS ERROR] {e}")
 
                 try:
-                    await page.evaluate(
+                    await safe_evaluate(
+                        page,
                         """() => {
                         document.querySelectorAll('button, .play, .video-play, .btn-play, .vjs-big-play-button, .player-button')
                         .forEach(el => { try { el.click(); } catch (e) {} });
-                    }"""
+                    }""",
                     )
                     await page.wait_for_timeout(1500)
 
                     try:
-                        video_url = await page.evaluate(
+                        video_url = await safe_evaluate(
+                            page,
                             """
                         () => {
                             const vid = document.querySelector("video");
@@ -709,15 +736,17 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                             }
                             return null;
                         }
-                        """
+                        """,
                         )
                         try:
-                            uses_mse = await page.evaluate(
-                                "() => !!(window.MediaSource && typeof window.MediaSource === 'function')"
+                            uses_mse = await safe_evaluate(
+                                page,
+                                "() => !!(window.MediaSource && typeof window.MediaSource === 'function')",
                             )
                             if uses_mse:
                                 print("[MEDIA SOURCE] Detected use of MediaSource API")
-                                blob_url = await page.evaluate(
+                                blob_url = await safe_evaluate(
+                                    page,
                                     """
                                     () => {
                                         const vids = document.querySelectorAll("video");
@@ -726,14 +755,11 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                                         }
                                         return null;
                                     }
-                                    """
+                                    """,
                                 )
                                 if blob_url:
-                                    if not blob_url.startswith("blob:"):
-                                        blob_url = f"blob:{blob_url}"
-                                    video_requests.append(blob_url)
                                     print(
-                                        f"[BLOB URL DETECTED] {blob_url} (not downloadable)"
+                                        f"[BLOB URL DETECTED] {blob_url} — skipping, not downloadable"
                                     )
                         except Exception as e:
                             print(f"[MEDIA SOURCE CHECK ERROR] {e}")
@@ -745,33 +771,18 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                 except Exception as e:
                     print(f"[CLICK SIMULATION ERROR] {e}")
 
-                last_height = await page.evaluate("document.body.scrollHeight")
+                last_height = await safe_evaluate(page, "document.body.scrollHeight")
                 for _ in range(5):
-                    await page.evaluate(
-                        "window.scrollBy(0, document.body.scrollHeight)"
+                    await safe_evaluate(
+                        page, "window.scrollBy(0, document.body.scrollHeight)"
                     )
                     await page.wait_for_timeout(800)
-                    new_height = await page.evaluate("document.body.scrollHeight")
+                    new_height = await safe_evaluate(page, "document.body.scrollHeight")
                     if new_height == last_height:
                         break
                     last_height = new_height
 
                 await auto_bypass_consent_dialog(page)
-
-                for v_url in set(video_requests):
-                    try:
-                        await page.evaluate(
-                            """(vUrl) => {
-                            const v = document.createElement('video');
-                            const s = document.createElement('source');
-                            s.src = vUrl;
-                            v.appendChild(s);
-                            document.body.appendChild(v);
-                        }""",
-                            v_url,
-                        )
-                    except Exception as e:
-                        print(f"[VIDEO INJECT ERROR] {e}")
 
             finally:
                 try:
@@ -782,12 +793,15 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                     html = ""
 
                 try:
-                    if context and page in context.pages:
-                        await page.unroute_all(behavior="ignoreErrors")
+                    if context:
+                        await context.unroute("**/*")
                 except Exception as e:
                     print(f"[UNROUTE CLEANUP ERROR] {e}")
 
                 try:
+                    if page and not page.is_closed():
+                        await page.close()
+                    await asyncio.sleep(0.5)
                     if context:
                         await context.close()
                 except Exception as e:
@@ -797,7 +811,10 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
                         await browser.close()
                 except Exception as e:
                     print(f"[BROWSER CLOSE ERROR] {e}")
-                return html, list(set(video_requests))
+
+                return html, [
+                    v for v in set(video_requests) if not v.startswith("blob:")
+                ]
 
     for attempt in range(retries + 1):
         try:
@@ -805,9 +822,11 @@ async def fetch_rendered_html_playwright(url, timeout=90000, retries=1):
             if html and html.strip():
                 return html, video_urls
         except Exception as e:
-            print(f"[RETRY {attempt}] Playwright failed: {e}")
+            print(
+                f"[RETRY {attempt}] Playwright failed on URL: {url} — {type(e).__name__}: {e}"
+            )
         await asyncio.sleep(2 * (attempt + 1))
-    return ""
+    return "", []
 
 
 def preprocess_html(html):
@@ -962,7 +981,7 @@ def extract_video_candidate_links(html: str, base_url: str):
     return list(urls)[:20]
 
 
-async def extract_video_sources(html, base_url):
+async def extract_video_sources(html, base_url, power_scraping):
     soup = BeautifulSoup(html, "lxml")
     sources = set()
 
@@ -990,8 +1009,12 @@ async def extract_video_sources(html, base_url):
         if src and ("player" in src or "embed" in src):
             iframe_url = urljoin(base_url, str(src))
             try:
-                iframe_html, _ = await fetch_rendered_html_playwright(iframe_url)
-                nested_sources = await extract_video_sources(iframe_html, iframe_url)
+                iframe_html, _ = await fetch_rendered_html_playwright(
+                    iframe_url, power_scraping
+                )
+                nested_sources = await extract_video_sources(
+                    iframe_html, iframe_url, power_scraping
+                )
                 sources.update(nested_sources)
             except Exception as e:
                 print(f"[IFRAME RECURSION ERROR] {iframe_url}: {e}")
@@ -1063,10 +1086,17 @@ async def extract_video_sources(html, base_url):
         print(f"[EXTRACTED] Found {len(sources)} video URLs")
 
     print(f"[DEBUG] Found {len(sources)} video links on {base_url}")
-    return list(dict.fromkeys(sorted(sources)))
+
+    sorted_sources = sorted(
+        sources,
+        key=lambda x: (".mp4" in x, ".webm" in x, ".m3u8" in x, ".ts" in x),
+        reverse=True,
+    )
+
+    return list(dict.fromkeys(sorted_sources))
 
 
-async def extract_video_metadata(url, query_embed):
+async def extract_video_metadata(url, query_embed, power_scraping):
     if not is_valid_link(url):
         return None
 
@@ -1075,7 +1105,7 @@ async def extract_video_metadata(url, query_embed):
         print(f"[ERROR] No HTML content fetched from {url}")
         return None
 
-    video_links = await extract_video_sources(html, url)
+    video_links = await extract_video_sources(html, url, power_scraping)
     candidate_links = []
 
     if not video_links:
@@ -1085,16 +1115,34 @@ async def extract_video_metadata(url, query_embed):
             return None
 
     if not video_links:
-        for deep_url in rank_deep_links(candidate_links, query_embed)[:3]:
-            deep_html, _ = await fetch_rendered_html_playwright(deep_url)
-            if (
-                "404" in deep_html
-                or "Page not found" in deep_html
-                or re.search(r"\b(error|fail|unavailable)\b", deep_html, re.I)
-            ):
-                continue
-            deep_sources = await extract_video_sources(deep_html, deep_url)
-            if deep_sources:
+        ranked_deep_links = rank_deep_links(candidate_links, query_embed)[:5]
+
+        async def try_fetch_deep_link(deep_url):
+            try:
+                deep_html, _ = await fetch_rendered_html_playwright(
+                    deep_url, power_scraping=power_scraping
+                )
+                if not deep_html or re.search(
+                    r"(404|Page not found|\b(error|fail|unavailable)\b)",
+                    deep_html,
+                    re.I,
+                ):
+                    return None, None, None
+                deep_sources = await extract_video_sources(
+                    deep_html, deep_url, power_scraping
+                )
+                if deep_sources:
+                    return deep_url, deep_html, deep_sources
+            except Exception as e:
+                print(f"[DEEP LINK ERROR] {deep_url}: {e}")
+            return None, None, None
+
+        results = await asyncio.gather(
+            *[try_fetch_deep_link(url) for url in ranked_deep_links]
+        )
+
+        for deep_url, deep_html, deep_sources in results:
+            if deep_url and deep_html and deep_sources:
                 html = deep_html
                 url = deep_url
                 video_links = deep_sources
@@ -1154,16 +1202,20 @@ async def extract_video_metadata(url, query_embed):
         if video_url in seen_video_urls:
             continue
         seen_video_urls.add(video_url)
-        duration = await get_video_duration(video_url, html)
+        duration = await asyncio.wait_for(get_video_duration(url), timeout=10)
         if duration == 0.0:
             print(f"[DURATION WARNING] No valid duration found for {url}")
 
         is_stream = False
-        if video_url.startswith("blob:") or "m3u8" in video_url:
-            print(f"[INFO] Stream detected (blob/m3u8): {video_url}")
+        if "m3u8" in video_url:
+            print(f"[INFO] Stream detected (m3u8): {video_url}")
             is_stream = True
             if duration == 0.0:
                 duration = 60.0
+
+        if video_url.startswith("blob:"):
+            print(f"[SKIP] Ignoring stream (blob): {video_url}")
+            continue
 
         if duration == 0:
             print(f"[WARNING] Accepting video with unknown duration: {video_url}")
@@ -1211,6 +1263,8 @@ async def extract_video_metadata(url, query_embed):
 async def search_engine_async(query, link_count):
     payload = {"q": query, "format": "json", "language": "en"}
     retries = 3
+    last_data = {}
+
     for attempt in range(retries):
         try:
             async with ClientSession(timeout=timeout_obj) as session:
@@ -1222,18 +1276,38 @@ async def search_engine_async(query, link_count):
                     if resp.status != 200:
                         raise Exception(f"HTTP {resp.status}")
                     data = await resp.json()
-                    return [
-                        r.get("url")
-                        for r in data.get("results", [])
-                        if is_valid_link(r.get("url"))
-                    ][:link_count]
+                    last_data = data
+                    results = []
+                    for r in data.get("results", []):
+                        u = r.get("url")
+                        if not is_valid_link(u):
+                            continue
+                        if urlparse(u).path.strip("/") == "":
+                            continue
+                        results.append(u)
+                    if results:
+                        return results[:link_count]
         except Exception as e:
             print(f"[SEARCH ERROR] Attempt {attempt+1}: {e}")
             await asyncio.sleep(2 * (attempt + 1))
-    return []
+
+    print("[FALLBACK] Using partial data from last attempt.")
+
+    fallback = []
+    for r in last_data.get("results", []):
+        u = r.get("url")
+        if not is_valid_link(u):
+            continue
+        if urlparse(u).path.strip("/") == "":
+            continue
+        fallback.append(u)
+
+    return fallback[:link_count]
 
 
-async def search_videos_async(query="4k videos", videos_to_return: int = 1):
+async def search_videos_async(
+    query="4k videos", videos_to_return: int = 1, power_scraping=False
+):
     video_count = 0
     max_videos = videos_to_return
 
@@ -1254,12 +1328,14 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
             try:
                 try:
                     result = await asyncio.wait_for(
-                        extract_video_metadata(url, query_embed), timeout=60
+                        extract_video_metadata(url, query_embed, power_scraping),
+                        timeout=60,
                     )
                 except asyncio.TimeoutError:
                     print(f"[RETRY] Timeout, retrying with reduced timeout: {url}")
                     result = await asyncio.wait_for(
-                        extract_video_metadata(url, query_embed), timeout=30
+                        extract_video_metadata(url, query_embed, power_scraping),
+                        timeout=30,
                     )
 
                 if result and result.get("videos"):
@@ -1267,7 +1343,7 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
             except asyncio.TimeoutError:
                 print(f"[TIMEOUT] {url}")
             except Exception as e:
-                print(f"[WORKER ERROR] {url}: {e}")
+                print(f"[WORKER ERROR] {url}: {e.__class__.__name__} - {e}")
             return url, None
 
     i, tasks, pending = 0, [], set()
@@ -1442,7 +1518,7 @@ async def search(query: str = "", power_scraping: bool = False):
     )
 
     try:
-        results = await search_videos_async(query, videos_to_return)
+        results = await search_videos_async(query, videos_to_return, power_scraping)
     except asyncio.TimeoutError:
         print(f"[TIMEOUT] Search query timed out: {query}")
         results = []
