@@ -1237,7 +1237,9 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
     video_count = 0
     max_videos = videos_to_return
 
-    expanded_queries = list(dict.fromkeys(expand_query_semantically(query)))
+    expanded_queries = [q for q in expand_query_semantically(query) if q.strip()]
+    if not expanded_queries:
+        expanded_queries = [query]
     print(f"[DEBUG] Expanded queries: {expanded_queries}")
 
     query_embed = model_embed.encode(query)
@@ -1247,136 +1249,158 @@ async def search_videos_async(query="4k videos", videos_to_return: int = 1):
 
     async def worker(url):
         domain = get_main_domain(url)
-        print(f"[WORKER][QUERY: {query}] Starting worker for: {url}")
+        print(f"[WORKER] Starting: {url}")
         async with sem, domain_counters[domain]:
             try:
-                result = await asyncio.wait_for(
-                    extract_video_metadata(url, query_embed), timeout=240
-                )
-                if not result or not result.get("videos"):
-                    print(f"[WORKER] No usable result for: {url}")
-                    return None
-                processed.add(url)
-                print(f"[WORKER] Completed: {url}")
-                return result
+                try:
+                    result = await asyncio.wait_for(
+                        extract_video_metadata(url, query_embed), timeout=60
+                    )
+                except asyncio.TimeoutError:
+                    print(f"[RETRY] Timeout, retrying with reduced timeout: {url}")
+                    result = await asyncio.wait_for(
+                        extract_video_metadata(url, query_embed), timeout=30
+                    )
+
+                if result and result.get("videos"):
+                    return url, result
             except asyncio.TimeoutError:
-                print(f"[WORKER TIMEOUT] {url}")
-                return None
+                print(f"[TIMEOUT] {url}")
             except Exception as e:
                 print(f"[WORKER ERROR] {url}: {e}")
-                return None
+            return url, None
 
-    i, tasks = 0, []
-    max_time = 180
+    i, tasks, pending = 0, [], set()
+    max_time = 360
     start_time = time.monotonic()
 
     while video_count < max_videos:
         elapsed = time.monotonic() - start_time
         if elapsed > max_time:
-            print("[LOOP] Max time reached, exiting loop.")
+            print(f"[TIMEOUT] Collected {video_count}/{max_videos}")
             break
 
         if i >= len(all_links):
-            print("[LOOP] Fetching more links for expanded queries...")
-
-            needed = videos_to_return - len(results)
+            print("[LOOP] Fetching more links...")
+            needed = max_videos - video_count
             cores = os.cpu_count() or 4
             ram_gb = psutil.virtual_memory().total // 1_073_741_824
-            base_multiplier = 1 + (cores // 4) + (ram_gb // 8)
-            multiplier = max(2, min(base_multiplier, 6))
-            estimated_needed_links = max(5, multiplier * needed)
-            per_query = max(1, estimated_needed_links // len(expanded_queries))
+            multiplier = max(2, min(1 + (cores // 4) + (ram_gb // 8), 6))
+            estimated_links = max(20, multiplier * needed)
+            per_query = max(2, estimated_links // len(expanded_queries))
 
             for q in expanded_queries:
                 try:
                     links = await search_engine_async(q, per_query)
-                    new_links = [u for u in links if u not in collected]
-                    all_links += new_links
+                    await asyncio.sleep(0.5)
+                    new_links = [
+                        u for u in links if u not in collected and u not in processed
+                    ]
+                    all_links.extend(new_links)
+                    all_links = list(dict.fromkeys(all_links))
                     collected.update(new_links)
                 except Exception as e:
-                    print(f"[LOOP ERROR] Failed to fetch links for query '{q}': {e}")
+                    print(f"[LINK ERROR] {q}: {e}")
 
-        while i < len(all_links) and len(tasks) < MAX_PARALLEL_TASKS:
+        while i < len(all_links) and (len(tasks) + len(pending)) < MAX_PARALLEL_TASKS:
             url = all_links[i]
             if url not in processed:
                 tasks.append(asyncio.create_task(worker(url)))
             i += 1
 
         if not tasks:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)
             continue
 
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, still_pending = await asyncio.wait(
+            tasks, return_when=asyncio.FIRST_COMPLETED
+        )
+        tasks = [t for t in tasks if not t in done]
 
-        for d in done:
-            tasks.remove(d)
+        for task in done:
             try:
-                result = d.result()
+                url, result = await task
+                if url:
+                    processed.add(url)
+
                 if result:
-                    unique_videos = []
+                    new_videos = []
                     for video in result.get("videos", []):
-                        if video["url"] in seen_video_urls:
-                            continue
-                        seen_video_urls.add(video["url"])
-                        unique_videos.append(video)
+                        norm_url = normalize_url(video["url"])
+                        if norm_url not in seen_video_urls:
+                            seen_video_urls.add(norm_url)
+                            new_videos.append(video)
 
-                    if unique_videos:
-                        result["videos"] = unique_videos
-                        num_new = len(unique_videos)
-
-                        if video_count + num_new > max_videos:
-                            result["videos"] = result["videos"][
-                                : max_videos - video_count
-                            ]
-                            num_new = len(result["videos"])
-
-                        if num_new > 0:
-                            results.append(result)
-                            video_count += num_new
-
+                    if new_videos:
+                        remaining = max_videos - video_count
+                        accepted = new_videos[:remaining]
+                        result["videos"] = accepted
+                        results.append(result)
+                        video_count += len(accepted)
                         print(
-                            f"[RESULT][QUERY: {query}] Received result from task: {result.get('url')}"
+                            f"[RESULT] {len(accepted)} accepted from {url} — total: {video_count}/{max_videos}"
                         )
 
+                        if video_count >= max_videos:
+                            print("[SUCCESS] Target reached.")
+                            break
             except Exception as e:
-                print(f"[RESULT ERROR] Failed task: {e}")
+                print(f"[TASK ERROR] {e}")
+        if video_count >= max_videos:
+            break
 
-    if tasks:
-        done, pending = await asyncio.wait(tasks, timeout=15)
-        for task in pending:
+    for task in tasks:
+        if not task.done():
             task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        for d in done:
-            try:
-                result = d.result()
-                if result:
-                    unique_videos = []
-                    for video in result.get("videos", []):
-                        if video["url"] in seen_video_urls:
-                            continue
-                        seen_video_urls.add(video["url"])
-                        unique_videos.append(video)
+    await asyncio.gather(*tasks, return_exceptions=True)
+    tasks.clear()
 
-                    if unique_videos:
-                        result["videos"] = unique_videos
-                        num_new = len(unique_videos)
+    all_videos = []
+    for result in results:
+        for video in result["videos"]:
+            video["parent_url"] = result["url"]
+            video["source_title"] = result["title"]
+            all_videos.append(video)
 
-                        if video_count + num_new > max_videos:
-                            result["videos"] = result["videos"][
-                                : max_videos - video_count
-                            ]
-                            num_new = len(result["videos"])
+    ranked = rank_by_similarity(all_videos, query)
+    if not any(v.get("score", 0.0) > 0.0 for v in ranked):
+        ranked.sort(key=lambda v: float(v.get("duration", 0)), reverse=True)
+    ranked = (ranked or [])[:max_videos]
 
-                        if num_new > 0:
-                            results.append(result)
-                            video_count += num_new
+    if len(ranked) < max_videos:
+        print(
+            f"[FILLING] Only {len(ranked)}/{max_videos} ranked. Padding with fallback..."
+        )
+        seen_urls = {v["url"] for v in ranked}
+        fallback = [v for v in all_videos if v["url"] not in seen_urls]
+        ranked.extend(fallback[: max_videos - len(ranked)])
 
-                        print(
-                            f"[RESULT][QUERY: {query}] Received result from task: {result.get('url')}"
-                        )
+    if len(ranked) < max_videos:
+        leftovers = [
+            v for v in all_videos if v["url"] not in {v["url"] for v in ranked}
+        ]
+        ranked.extend(leftovers[: max_videos - len(ranked)])
 
-            except Exception as e:
-                print(f"[FINAL RESULT ERROR] {e}")
+    ranked = ranked[:max_videos]
+
+    grouped = {}
+    for video in ranked:
+        url = video["parent_url"]
+        if url not in grouped:
+            grouped[url] = {
+                "url": url,
+                "title": video.get("source_title", ""),
+                "description": "",
+                "videos": [],
+            }
+        grouped[url]["videos"].append(video)
+
+    results = list(grouped.values())
+
+    if video_count < max_videos:
+        print(
+            f"[WARNING] Only {video_count}/{max_videos} collected. Consider increasing timeout or search depth."
+        )
 
     return results
 
@@ -1391,6 +1415,7 @@ async def lifespan(_: FastAPI):
     flush_task = asyncio.create_task(auto_flush_loop())
     yield
     flush_task.cancel()
+    await asyncio.gather(flush_task, return_exceptions=True)
     try:
         await flush_task
     except asyncio.CancelledError:
@@ -1417,9 +1442,7 @@ async def search(query: str = "", power_scraping: bool = False):
     )
 
     try:
-        results = await asyncio.wait_for(
-            search_videos_async(query, videos_to_return), timeout=180
-        )
+        results = await search_videos_async(query, videos_to_return)
     except asyncio.TimeoutError:
         print(f"[TIMEOUT] Search query timed out: {query}")
         results = []
