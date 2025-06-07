@@ -420,7 +420,6 @@ async def auto_bypass_consent_dialog(page):
             if element:
                 try:
                     if await element.is_visible():
-                        print(f"[CONSENT] Clicking visible selector: {selector}")
                         await element.click(force=True)
                         await page.wait_for_timeout(1000)
                         break
@@ -715,7 +714,6 @@ async def search_videos_async(query):
             i += 1
 
         if not tasks:
-            print("[TASK] No active tasks, waiting...")
             await asyncio.sleep(0.1)
             continue
 
