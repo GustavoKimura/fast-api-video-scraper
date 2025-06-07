@@ -1,7 +1,6 @@
 # === 📦 IMPORTS ===
-import os, random, hashlib, asyncio, re, time, psutil
+import os, random, hashlib, asyncio, re, time, psutil, torch, open_clip, tldextract, trafilatura
 from urllib.parse import urlparse, urlunparse, urljoin
-import torch, open_clip, aiohttp, tldextract, trafilatura
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from contextlib import asynccontextmanager
@@ -9,7 +8,7 @@ from bs4 import BeautifulSoup, Tag
 from readability import Document
 from langdetect import DetectorFactory, detect
 from deep_translator import GoogleTranslator
-from aiohttp import ClientTimeout
+from aiohttp import ClientTimeout, ClientSession
 from keybert import KeyBERT
 from playwright.async_api import async_playwright
 from boilerpy3 import extractors
@@ -38,7 +37,6 @@ SUMMARIES = 5
 DetectorFactory.seed = 0
 timeout_obj = ClientTimeout(total=5)
 content_extractor = extractors.LargestContentExtractor()
-MAX_PARALLEL_TASKS = int(os.getenv("SCRAPER_PARALLELISM", (os.cpu_count() or 4) * 2))
 SEARXNG_BASE_URL = "http://searxng:8080/search"
 
 USER_AGENTS = [
@@ -97,7 +95,7 @@ def cosine_sim(a, b):
     return float(dot(a, b) / (norm(a) * norm(b) + 1e-8))
 
 
-def rank_by_similarity(results, query_embed, min_duration=60, max_duration=900):
+def rank_by_similarity(results, query_embed, min_duration=30, max_duration=1800):
     query_tags = set(extract_tags(query_embed))
     final = []
 
@@ -226,12 +224,17 @@ def extract_tags(text: str, top_n: int = 10) -> List[Tuple[str, float]]:
 
 
 # === 🌐 RENDER + EXTRACT ===
-async def fetch_rendered_html_playwright(url, timeout=15000):
+async def fetch_rendered_html_playwright(url, timeout=30000):
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-web-security",
+                ],
             )
             context = await browser.new_context(
                 user_agent=get_user_agent(),
@@ -240,23 +243,35 @@ async def fetch_rendered_html_playwright(url, timeout=15000):
                 bypass_csp=True,
                 locale="en-US",
             )
-            domain = urlparse(url).netloc.replace("www.", "")
-            await context.add_cookies(
-                [
-                    {"name": "RTA", "value": "1", "domain": f".{domain}", "path": "/"},
-                    {
-                        "name": "age_verified",
-                        "value": "1",
-                        "domain": f".{domain}",
-                        "path": "/",
-                    },
-                ]
-            )
+
             page = await context.new_page()
+
+            try:
+                from playwright_stealth import stealth_async
+
+                await stealth_async(page)
+            except:
+                pass
+
             await page.goto(url, timeout=timeout)
-            await page.wait_for_timeout(3000)
+            await page.wait_for_load_state("networkidle")
+            await page.mouse.wheel(0, 5000)
+            await page.wait_for_timeout(2000)
+            await page.mouse.click(640, 360)
+            await page.wait_for_timeout(5000)
             html = await page.content()
             await browser.close()
+
+            if any(
+                s in html.lower()
+                for s in [
+                    "captcha",
+                    "cf-chl-bypass",
+                    "turnstile",
+                    "checking your browser",
+                ]
+            ):
+                return ""
             return html
     except Exception as e:
         print(f"[Playwright Error] {url}: {e}")
@@ -374,16 +389,27 @@ def extract_video_sources(html, base_url):
         src = tag.get("src") or tag.get("data-src")
         if src:
             full_url = urljoin(base_url, str(src))
-            if any(
-                full_url.endswith(ext) for ext in [".mp4", ".webm", ".m3u8", ".mov"]
-            ):
+            if re.search(r"\.(mp4|webm|m3u8|mov)", full_url):
                 sources.add(full_url)
 
+    # Iframe embedded players
     for iframe in soup.find_all("iframe", src=True):
         if not isinstance(iframe, Tag):
             continue
         src = iframe["src"]
-        if "player" in src or any(ext in src for ext in ["mp4", "m3u8", "embed"]):
+        if (
+            "player" in src
+            or "embed" in src
+            or any(ext in src for ext in ["mp4", "m3u8"])
+        ):
+            sources.add(urljoin(base_url, str(src)))
+
+    # Common lazy-loaded attributes
+    for tag in soup.find_all(attrs={"data-src": True}):
+        if not isinstance(tag, Tag):
+            continue
+        src = tag["data-src"]
+        if re.search(r"\.(mp4|webm|m3u8|mov)", str(src)):
             sources.add(urljoin(base_url, str(src)))
 
     return list(sources)
@@ -393,13 +419,6 @@ async def process_url_async(url, query_embed):
     if not is_valid_link(url):
         return None
     html = await fetch_rendered_html_playwright(url)
-    if (
-        not html
-        or "Just a moment..." in html
-        or "checking your browser" in html.lower()
-    ):
-        return None
-
     deep_links = rank_deep_links(extract_deep_links(html, url), query_embed)
 
     for deep_url in deep_links[:5]:
@@ -455,7 +474,7 @@ async def process_url_async(url, query_embed):
 
 async def search_engine_async(query, link_count):
     payload = {"q": query, "format": "json", "language": "en"}
-    async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+    async with ClientSession(timeout=timeout_obj) as session:
         async with session.post(
             SEARXNG_BASE_URL, data=payload, headers={"User-Agent": get_user_agent()}
         ) as resp:
