@@ -831,7 +831,13 @@ async def fetch_rendered_html_playwright(
                     page,
                     """window.alert = () => {}; window.confirm = () => true;""",
                 )
-                await page.wait_for_load_state("domcontentloaded", timeout=timeout)
+
+                try:
+                    await auto_bypass_consent_dialog(page)
+                except Exception as e:
+                    logging.warning(f"Bypass failed but continuing: {e}")
+
+                await page.wait_for_load_state("networkidle", timeout=timeout)
                 await page.wait_for_timeout(2000)
 
                 try:
@@ -939,8 +945,6 @@ async def fetch_rendered_html_playwright(
                 if new_height == last_height:
                     break
                 last_height = new_height
-
-            await auto_bypass_consent_dialog(page)
 
             await safe_evaluate(
                 page,
@@ -1065,55 +1069,100 @@ def extract_content(html):
 async def auto_bypass_consent_dialog(page):
     try:
         await page.wait_for_timeout(150)
+
         selectors = [
             '[id*="consent"]',
             '[class*="consent"]',
-            "text=Enter",
-            "text=I Agree",
-            "text=Continue",
-            "text=Yes",
-            "text=Proceed",
-            "text=I am 18+",
-            "text=Tenho mais de 18 anos",
-            "text=Tenho 18 anos",
-            "text=Entrar",
-            "text=Sim",
-            "text=Aceitar",
-            "button:has-text('Enter')",
-            "button:has-text('Continue')",
-            "button:has-text('Accept')",
-            "button:has-text('OK')",
-            "button:has-text('Got it')",
-            "button:has-text('Agree')",
-            "button:has-text('Enter site')",
-            "button:has-text('Eu tenho mais de 18 anos')",
+            '[class*="dialog"]',
+            '[class*="popup"]',
+            '[id*="age"]',
+            '[class*="overlay"]',
+            '[role="dialog"]',
+            '[class*="parental"]',
+            '[class*="gate"]',
+            '[class*="block"]',
+            '[class*="modal"]',
         ]
-        for selector in selectors:
+        for sel in selectors:
             try:
-                element = await page.query_selector(selector)
+                await page.evaluate(
+                    f"""
+                    () => {{
+                        document.querySelectorAll('{sel}').forEach(el => {{
+                            el.style.setProperty('display', 'none', 'important');
+                            el.style.setProperty('visibility', 'hidden', 'important');
+                            el.style.setProperty('pointer-events', 'none', 'important');
+                            el.style.setProperty('z-index', '-9999', 'important');
+                            try {{ el.remove(); }} catch (_) {{}}
+                        }});
+                    }}
+                """
+                )
+            except Exception as e:
+                logging.debug(f"HIDE FAIL: {sel} -> {e}")
+
+        click_texts = [
+            "Enter",
+            "Continue",
+            "OK",
+            "Accept",
+            "I Agree",
+            "Yes",
+            "Sim",
+            "Entrar",
+            "I am 18",
+            "I am 18+",
+            "I'm 18",
+            "Tenho 18 anos",
+            "Proceed",
+            "Start",
+        ]
+
+        for text in click_texts:
+            try:
+                element = await page.query_selector(f"text={text}")
                 if element and await element.is_visible():
                     await element.click(force=True)
-                    await page.wait_for_timeout(300)
+                    await page.wait_for_timeout(200)
             except Exception as e:
-                logging.warning(f"AUTO CONSENT ERROR - {selector}: {e}")
-    except Exception as e:
-        logging.error(f"CONSENT ERROR - {e}")
-
-    try:
-        await page.keyboard.press("Enter")
+                logging.debug(f"CLICK FAIL: {text} -> {e}")
 
         await page.evaluate(
-            """() => {
-            document.querySelectorAll('*')
-                .forEach(el => { if (el.innerText?.includes('parental control') || el.className?.includes('dialog')) {
-                    try { el.remove(); } catch (_) {}
-                }});
-        }"""
+            """
+            () => {
+                const btns = Array.from(document.querySelectorAll('button, a')).filter(el => {
+                    const text = el.innerText?.toLowerCase?.() || "";
+                    return ['enter', 'accept', 'yes', 'i agree', 'continue'].some(t => text.includes(t));
+                });
+                for (const btn of btns) {
+                    try { btn.click(); } catch (_) {}
+                }
+            }
+        """
         )
 
-        await page.wait_for_timeout(500)
-    except Exception:
-        pass
+        await page.keyboard.press("Enter")
+        await page.wait_for_timeout(300)
+
+        frames = page.frames
+        for frame in frames:
+            try:
+                await frame.evaluate(
+                    """
+                    () => {
+                        document.querySelectorAll('button, .btn, .accept, .agree').forEach(el => {
+                            if (el.innerText?.toLowerCase().includes('agree')) {
+                                try { el.click(); } catch (_) {}
+                            }
+                        });
+                    }
+                """
+                )
+            except Exception:
+                continue
+
+    except Exception as e:
+        logging.error(f"[CONSENT ERROR] {type(e).__name__}: {e}")
 
 
 async def extract_metadata(html, url):
@@ -1219,6 +1268,9 @@ async def extract_video_sources(html, base_url, power_scraping):
             "data-video-url",
             "data-mp4",
             "data-webm",
+            "data-preview",
+            "data-srcset",
+            "data-file",
         ]:
             src = tag.get(src_attr)
             if src:
@@ -1345,6 +1397,11 @@ async def extract_video_metadata(url, query_embed, power_scraping):
         return None
 
     video_links = await extract_video_sources(html, url, power_scraping)
+
+    if not video_links and intercepted_links:
+        logging.warning(f"Fallback: using intercepted links directly for {url}")
+        video_links = intercepted_links
+
     video_links = list(dict.fromkeys(video_links + intercepted_links))
     candidate_links = []
 
@@ -1745,6 +1802,11 @@ async def search_videos_async(
     if video_count < max_videos:
         logging.warning(
             f"Only {video_count}/{max_videos} collected. Consider increasing timeout or search depth."
+        )
+
+    if not ranked:
+        logging.warning(
+            "No videos ranked. Collected but possibly filtered or invalid format."
         )
 
     return results
