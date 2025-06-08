@@ -804,9 +804,20 @@ async def fetch_rendered_html_playwright(
                 await page.wait_for_timeout(2000)
 
                 try:
-                    await page.click(
-                        "video, .thumb, .player, .video-thumb", timeout=3000
-                    )
+                    for selector in [
+                        "video",
+                        ".thumb",
+                        ".player",
+                        ".video-thumb",
+                        ".video-thumb--type-video",
+                    ]:
+                        try:
+                            await page.click(selector, timeout=1500)
+                            await page.wait_for_timeout(1000)
+                            logging.debug(f"Clicked element: {selector}")
+                        except Exception as e:
+                            logging.debug(f"Failed to click {selector}: {e}")
+
                     await page.wait_for_timeout(2000)
                     logging.debug("Clicked video/player element to trigger JS playback")
                 except Exception as e:
@@ -1295,13 +1306,15 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     if not is_valid_link(url):
         return None
 
-    html, video_links = await fetch_rendered_html_playwright(url)
+    html, intercepted_links = await fetch_rendered_html_playwright(url)
+    video_links = intercepted_links
     html = preprocess_html(html)
     if not html or not html.strip():
         logging.error(f"No HTML content fetched from {url}")
         return None
 
     video_links = await extract_video_sources(html, url, power_scraping)
+    video_links = list(dict.fromkeys(video_links + intercepted_links))
     candidate_links = []
 
     if not video_links:
@@ -1462,8 +1475,13 @@ async def extract_video_metadata(url, query_embed, power_scraping):
             }
         )
 
-    if not videos:
-        return None
+    if not video_links:
+        if intercepted_links:
+            video_links = intercepted_links
+            logging.warning(f"Fallback: using intercepted links directly for {url}")
+        else:
+            logging.info(f"BAILOUT - No video sources or candidate links for {url}")
+            return None
 
     videos = await deduplicate_videos(videos)
 
