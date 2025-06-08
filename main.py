@@ -211,6 +211,31 @@ BAD_TAGS = [
     "function",
 ]
 
+NOT_VIDEO_EXTENSIONS = [
+    ".js",
+    ".css",
+    ".jpg",
+    ".png",
+    ".woff",
+    ".ico",
+    ".svg",
+    ".gif",
+    ".webp",
+    ".pdf",
+    ".doc",
+    ".xls",
+    ".zip",
+    ".rar",
+    ".ppt",
+    ".txt",
+    ".json",
+    ".xml",
+    ".csv",
+    ".mp3",
+    ".wav",
+    ".ogg",
+]
+
 LANGUAGES_BLACKLIST = {"da", "so", "tl", "nl", "sv", "af", "el"}
 
 
@@ -461,7 +486,10 @@ def duration_to_seconds(duration_str: str):
         return 0
 
 
-async def get_video_duration(url: str, html: str = "") -> float:
+async def get_video_duration(url: str, html: str = ""):
+    if any(ext in url.lower() for ext in NOT_VIDEO_EXTENSIONS):
+        return 0.0
+
     async with ffprobe_sem:
         try:
             cmd = [
@@ -506,7 +534,10 @@ async def get_video_duration(url: str, html: str = "") -> float:
     return 0.0
 
 
-async def get_video_resolution_score(url: str) -> int:
+async def get_video_resolution_score(url: str):
+    if any(ext in url.lower() for ext in NOT_VIDEO_EXTENSIONS):
+        return 0
+
     async with ffprobe_sem:
         try:
             cmd = [
@@ -538,7 +569,7 @@ async def get_video_resolution_score(url: str) -> int:
     return 0
 
 
-def extract_tags(text: str, top_n: int = 10):
+def extract_tags(text: str):
     clean = re.sub(r"[^a-zA-Z0-9\s]", "", text).lower()
     raw_results = extract_keywords(clean, diversity=0.7)
 
