@@ -1447,6 +1447,7 @@ async def extract_video_metadata(url, query_embed, power_scraping):
 
     videos = []
     seen_video_urls = set()
+    fallback_log_tracker = defaultdict(list)
 
     async def get_metadata_for(video_url):
         if video_url in seen_video_urls:
@@ -1463,9 +1464,12 @@ async def extract_video_metadata(url, query_embed, power_scraping):
             duration = 0.0
 
         is_stream = "m3u8" in video_url
+
         if duration == 0.0:
             duration = 60.0 if is_stream else 30.0
-            logging.warning(f"Fallback duration for {video_url}: {duration}s")
+            parsed = urlparse(video_url)
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            fallback_log_tracker[base].append(video_url)
 
         if video_url.startswith("blob:"):
             logging.debug(f"Skipping blob URL: {video_url}")
@@ -1493,6 +1497,9 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     tasks = [get_metadata_for(url) for url in video_links]
     results = await asyncio.gather(*tasks, return_exceptions=False)
     videos = [v for v in results if v is not None]
+
+    for base, urls in fallback_log_tracker.items():
+        logging.warning(f"Fallback duration for {base} ({len(urls)} video(s)): 30.0s")
 
     if not video_links:
         if intercepted_links:
