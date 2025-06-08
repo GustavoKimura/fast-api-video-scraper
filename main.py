@@ -73,7 +73,7 @@ def get_ffprobe_concurrency():
 async def run_ffprobe(cmd):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        executor, lambda: subprocess.check_output(cmd, timeout=15).decode().strip()
+        executor, lambda: subprocess.check_output(cmd, timeout=10).decode().strip()
     )
 
 
@@ -81,7 +81,7 @@ async def run_ffprobe_json(cmd):
     loop = asyncio.get_running_loop()
 
     def run():
-        result = subprocess.check_output(cmd, timeout=15).decode().strip()
+        result = subprocess.check_output(cmd, timeout=10).decode().strip()
         return json.loads(result)
 
     return await loop.run_in_executor(executor, run)
@@ -339,6 +339,11 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
     for r in final:
         logging.debug(
             f"SCORE DEBUG - {r['score']:.4f} | {r.get('url', '')[:50]} | Tags: {r.get('tags', [])}"
+        )
+
+    if not final:
+        logging.warning(
+            "RANKING - No videos scored above 0. All videos may have failed metadata or tag generation."
         )
 
     return sorted(final, key=lambda x: x["score"], reverse=True)
@@ -756,7 +761,12 @@ async def fetch_rendered_html_playwright(
                 logging.info(f"STEALTH ERROR - {e}")
 
             try:
-                await page.goto(url, timeout=timeout)
+                try:
+                    await page.goto(url, timeout=timeout)
+                except Exception as e:
+                    logging.warning(f"PAGE GOTO ERROR - {url}: {e}")
+                    return "", []
+
                 await safe_evaluate(
                     page,
                     """window.alert = () => {}; window.confirm = () => true;""",
@@ -877,8 +887,11 @@ async def fetch_rendered_html_playwright(
             await context.unroute("**/*")
 
             try:
-                if page and not page.is_closed():
-                    await page.close()
+                try:
+                    if page and not page.is_closed():
+                        await page.close()
+                except Exception as e:
+                    logging.warning(f"SAFE PAGE CLOSE ERROR - {e}")
             except Exception as e:
                 logging.error(f"PAGE CLOSE ERROR - {e}")
 
@@ -975,6 +988,12 @@ async def auto_bypass_consent_dialog(page):
                 logging.warning(f"AUTO CONSENT ERROR - {selector}: {e}")
     except Exception as e:
         logging.error(f"CONSENT ERROR - {e}")
+
+    try:
+        await page.keyboard.press("Enter")
+        await page.wait_for_timeout(500)
+    except Exception:
+        pass
 
 
 async def extract_metadata(html, url):
@@ -1430,16 +1449,22 @@ async def search_videos_async(
     all_links, results, processed, seen_video_urls = [], [], set(), set()
     collected = set()
     sem = asyncio.Semaphore(min(MAX_PARALLEL_TASKS, 8))
+    domain_failures = defaultdict(int)
 
     async def worker(url):
         domain = get_main_domain(url)
         logging.info(f"WORKER - Starting: {url}")
+
+        if domain_failures[domain] > 3:
+            logging.info(f"SKIP - Too many failures for {domain}")
+            return url, None
+
         async with sem, domain_counters[domain]:
             try:
                 try:
                     result = await asyncio.wait_for(
                         extract_video_metadata(url, query_embed, power_scraping),
-                        timeout=30 if not power_scraping else 60,
+                        timeout=45 if not power_scraping else 90,
                     )
                 except asyncio.TimeoutError:
                     logging.warning(
@@ -1456,7 +1481,9 @@ async def search_videos_async(
                 logging.warning(f"TIMEOUT - {url}")
             except Exception as e:
                 logging.info(f"WORKER ERROR - {url}: {e.__class__.__name__} - {e}")
-            return url, None
+            finally:
+                domain_failures[domain] += 1
+                return url, None
 
     i, tasks = 0, []
     max_time = 360
