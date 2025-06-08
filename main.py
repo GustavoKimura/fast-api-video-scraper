@@ -756,6 +756,8 @@ async def fetch_rendered_html_playwright(
                 ]
             ):
                 if req_url not in video_requests:
+                    if "collector." in req_url or "log=" in req_url:
+                        return await route.continue_()
                     logging.debug(f"INTERCEPT - Video URL: {req_url}")
                     video_requests.append(req_url)
             await route.continue_()
@@ -1527,6 +1529,9 @@ async def extract_video_metadata(url, query_embed, power_scraping):
             parsed = urlparse(video_url)
             base = f"{parsed.scheme}://{parsed.netloc}"
             fallback_log_tracker[base].append(video_url)
+            score_boost = 0.2 if is_stream else 0.1
+        else:
+            score_boost = 0.0
 
         if video_url.startswith("blob:"):
             logging.debug(f"Skipping blob URL: {video_url}")
@@ -1547,13 +1552,14 @@ async def extract_video_metadata(url, query_embed, power_scraping):
             "title": title,
             "tags": tags,
             "duration": f"{duration:.2f}",
-            "score": 0.0,
+            "score": score_boost,
             "is_stream": is_stream,
         }
 
     tasks = [get_metadata_for(url) for url in video_links]
     results = await asyncio.gather(*tasks, return_exceptions=False)
     videos = [v for v in results if v is not None]
+    video_links = list(dict.fromkeys(video_links + intercepted_links))
 
     for base, urls in fallback_log_tracker.items():
         logging.warning(f"Fallback duration for {base} ({len(urls)} video(s)): 30.0s")
@@ -1891,6 +1897,10 @@ async def search(query: str = "", power_scraping: bool = False):
         deduped = all_videos
 
     ranked_videos = rank_by_similarity(deduped, query)[:videos_to_return]
+
+    if not ranked_videos:
+        logging.warning("FALLBACK - No ranked videos, using raw deduped list.")
+        ranked_videos = deduped[:videos_to_return]
 
     ranked_results = {}
     for video in ranked_videos:
