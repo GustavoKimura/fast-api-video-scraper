@@ -1445,48 +1445,34 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     meta = await extract_metadata(html, url)
     tags = auto_generate_tags_from_text(f"{text.strip()} {meta['title']}", top_k=10)
 
-    seen_video_urls = set()
     videos = []
-    for video_url in video_links:
+    seen_video_urls = set()
+
+    async def get_metadata_for(video_url):
         if video_url in seen_video_urls:
-            continue
+            return None
         seen_video_urls.add(video_url)
-        duration = await asyncio.wait_for(
-            get_video_duration(video_url, html),
-            timeout=60 if power_scraping else 30,
-        )
+
+        try:
+            duration = await asyncio.wait_for(
+                get_video_duration(video_url, html),
+                timeout=60 if power_scraping else 30,
+            )
+        except Exception as e:
+            logging.warning(f"DURATION FAIL - {video_url}: {e}")
+            duration = 0.0
 
         is_stream = "m3u8" in video_url
         if duration == 0.0:
-            if is_stream:
-                logging.warning(
-                    f"No duration, assuming default 60s for stream: {video_url}"
-                )
-                duration = 60.0
-            else:
-                logging.warning(
-                    f"No valid duration found for {video_url}, defaulting to 30s"
-                )
-                duration = 30.0
-        if is_stream:
-            logging.info(f"Stream detected (m3u8): {video_url}")
+            duration = 60.0 if is_stream else 30.0
+            logging.warning(f"Fallback duration for {video_url}: {duration}s")
 
         if video_url.startswith("blob:"):
-            logging.debug(
-                f"Ignoring unsupported blob stream: {video_url} — parent: {url}"
-            )
-            continue
-
-        if duration == 0:
-            logging.warning(f"Accepting video with unknown duration: {video_url}")
+            logging.debug(f"Skipping blob URL: {video_url}")
+            return None
 
         if not tags:
             logging.warning(f"Accepting video with no tags: {video_url}")
-
-        if not meta["title"].strip():
-            logging.warning(
-                f"Accepting video with no title, fallback to URL: {video_url}"
-            )
 
         title = (
             meta["title"]
@@ -1495,16 +1481,18 @@ async def extract_video_metadata(url, query_embed, power_scraping):
             or "Untitled"
         )
 
-        videos.append(
-            {
-                "url": video_url,
-                "title": title,
-                "tags": tags,
-                "duration": f"{duration:.2f}",
-                "score": 0.0,
-                "is_stream": is_stream,
-            }
-        )
+        return {
+            "url": video_url,
+            "title": title,
+            "tags": tags,
+            "duration": f"{duration:.2f}",
+            "score": 0.0,
+            "is_stream": is_stream,
+        }
+
+    tasks = [get_metadata_for(url) for url in video_links]
+    results = await asyncio.gather(*tasks, return_exceptions=False)
+    videos = [v for v in results if v is not None]
 
     if not video_links:
         if intercepted_links:
