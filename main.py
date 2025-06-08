@@ -322,80 +322,48 @@ def cosine_sim(a, b):
     return float(dot(a, b) / (norm_a * norm_b))
 
 
-def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
-    query_embed = model_embed.encode_cached(query)
-
-    raw_tags = extract_tags(query)
-    query_tags = {kw for kw, _ in raw_tags if isinstance(kw, str)}
-
-    tag_boosts = boost_by_tag_cooccurrence(results)
-    seen_domains = set()
-    final = []
+def rank_by_similarity(results, query, min_duration=5, max_duration=3600):
+    query = query.lower()
+    ranked = []
 
     for r in results:
         try:
-            dur_secs = float(r.get("duration", 0))
-        except (ValueError, TypeError):
+            duration = float(r.get("duration", 0))
+        except Exception:
             continue
 
-        if dur_secs < 0:
+        if not (min_duration <= duration <= max_duration):
             continue
+
+        title = r.get("title", "")
+        tags = r.get("tags", [])
+        combined_text = f"{title} {' '.join(tags)}".lower()
+
+        base_score = 0.0
+
+        if query in combined_text:
+            base_score += 1.0
         else:
-            if not (min_duration <= dur_secs <= max_duration):
-                continue
-            score_penalty = 0.0
+            for word in query.split():
+                if word in combined_text:
+                    base_score += 0.2
 
-        score = 0.0
+        score = r.get("score", 0.0)
+        base_score += score
 
-        if r.get("is_stream", False):
-            score_penalty += 0.4
+        resolution_score = r.get("resolution_score", 0)
+        base_score += 0.000001 * resolution_score
 
-        if r.get("tags"):
-            tag_text = " ".join(r["tags"])
-            tag_embed = model_embed.encode_cached(tag_text)
-            sim = cosine_sim(query_embed, tag_embed)
-            result_tags = normalize_tags(r.get("tags", []))
-            if not result_tags:
-                result_tags = normalize_tags(r.get("title", "").split())
-            query_tags_norm = normalize_tags(list(query_tags))
-            overlap = len(query_tags_norm & result_tags)
-            boost = sum(tag_boosts.get(normalize_tag(tag), 0) for tag in r["tags"])
-            score = sim + 0.05 * overlap + boost
+        r["score"] = base_score
+        ranked.append(r)
 
-        domain = get_main_domain(r["url"])
-        if domain in seen_domains:
-            score *= 0.85
-        else:
-            seen_domains.add(domain)
+    ranked.sort(key=lambda r: r.get("score", 0), reverse=True)
 
-        if score == 0.0 and r.get("title"):
-            title_embed = model_embed.encode_cached(r["title"])
-            score = cosine_sim(query_embed, title_embed) * 0.6
+    logging.debug(
+        f"RANK - Score: {base_score:.4f} | Title: {title} | Resolution: {resolution_score}"
+    )
 
-        r["score"] = score - score_penalty
-
-        final.append(r)
-
-    if final:
-        scores = [r["score"] for r in final]
-        min_score = min(scores)
-        max_score = max(scores)
-        if max_score > min_score:
-            for r in final:
-                r["score"] = (r["score"] - min_score) / (max_score - min_score)
-
-    for r in final:
-        logging.debug(
-            f"SCORE DEBUG - {r['score']:.4f} | {r.get('url', '')[:50]} | Tags: {r.get('tags', [])}"
-        )
-
-    if not final or all(r.get("score", 0.0) == 0.0 for r in final):
-        logging.warning(
-            "RANKING - No videos scored above 0. Using fallback sort by duration."
-        )
-        final.sort(key=lambda x: float(x.get("duration", 0)), reverse=True)
-
-    return sorted(final, key=lambda x: x["score"], reverse=True)
+    return ranked
 
 
 def rank_deep_links(links, query_embed):
@@ -699,32 +667,37 @@ def normalize_tags(tags: list[str]):
     return {normalize_tag(tag) for tag in tags}
 
 
-async def deduplicate_videos(videos: list[dict]) -> list[dict]:
-    seen = {}
+async def deduplicate_videos(videos: list[dict]):
+    seen = set()
+    deduped = []
     scores = {}
 
-    async def get_score(video):
-        return await get_video_resolution_score(video["url"])
-
     for video in videos:
-        base = re.sub(r"\.(mp4|webm|m3u8|mov)$", "", video["url"].lower())
-        key = (
-            normalize_tag(video["title"]),
-            frozenset(normalize_tags(video.get("tags", []))),
-            round(float(video.get("duration", 0)), 1),
-            base,
-        )
+        key = video.get("url") or video.get("src")
+        if not key:
+            continue
 
-        if key not in seen:
-            seen[key] = video
-            scores[key] = await get_score(video)
+        if key in seen:
+            continue
+
+        if key in scores:
+            existing = [v for v in deduped if (v.get("url") or v.get("src")) == key]
+            if existing:
+                existing_video = existing[0]
+                existing_score = scores[key]
+
+                new_score = video.get("resolution_score", video.get("score", 0))
+                if new_score > existing_score:
+                    deduped.remove(existing_video)
+                    deduped.append(video)
+                    scores[key] = new_score
         else:
-            new_score = await get_score(video)
-            if new_score > scores[key]:
-                seen[key] = video
-                scores[key] = new_score
+            deduped.append(video)
+            scores[key] = video.get("resolution_score", video.get("score", 0))
 
-    return list(seen.values())
+        seen.add(key)
+
+    return deduped
 
 
 # === 🌐 RENDER + EXTRACT ===
@@ -789,7 +762,7 @@ async def fetch_rendered_html_playwright(
                 page = await context.new_page()
             except Exception as e:
                 logging.error(f"Failed to create new page: {e}")
-                return "", []
+                return "", [], {}
 
             async def handle_stream_response(response):
                 try:
@@ -827,7 +800,7 @@ async def fetch_rendered_html_playwright(
                     await page.goto(url, timeout=timeout)
                 except Exception as e:
                     logging.warning(f"PAGE GOTO ERROR - {url}: {e}")
-                    return "", []
+                    return "", [], {}
 
                 await safe_evaluate(
                     page,
@@ -880,9 +853,18 @@ async def fetch_rendered_html_playwright(
 
                 if not page or page.is_closed():
                     logging.warning("Page is not available or already closed.")
-                    return "", []
+                    return "", [], {}
 
                 html = await page.content()
+
+                duration_fallback = await safe_evaluate(
+                    page,
+                    """() => {
+                        const video = document.querySelector('video');
+                        if (video && video.duration) return video.duration;
+                        return null;
+                    }""",
+                )
 
                 video_urls_dom = await safe_evaluate(
                     page,
@@ -901,7 +883,7 @@ async def fetch_rendered_html_playwright(
                     video_requests.extend(video_urls_dom)
             except Exception as e:
                 logging.info(f"NAVIGATION ERROR - {url}: {e}")
-                return "", []
+                return "", [], {}
 
             try:
                 await page.locator("video source").first.wait_for(timeout=8000)
@@ -1013,16 +995,22 @@ async def fetch_rendered_html_playwright(
             except Exception as e:
                 logging.warning(f"Screenshot capture failed: {e}")
 
-        return content, [v for v in set(video_requests) if not v.startswith("blob:")]
+        return (
+            content,
+            [v for v in set(video_requests) if not v.startswith("blob:")],
+            duration_fallback,
+        )
 
     try:
         for attempt in range(retries + 1):
             try:
-                html, video_urls = await _internal_fetch_with_playwright(
-                    url, timeout + attempt * 15000
+                html, video_urls, duration_fallback = (
+                    await _internal_fetch_with_playwright(
+                        url, timeout + attempt * 15000
+                    )
                 )
                 if html and html.strip():
-                    return html, video_urls
+                    return html, video_urls, duration_fallback
             except Exception as e:
                 logging.warning(f"RETRY {attempt} - Error fetching {url}: {e}")
             finally:
@@ -1030,7 +1018,7 @@ async def fetch_rendered_html_playwright(
     finally:
         await context.unroute("**/*")
 
-    return "", []
+    return "", [], {}
 
 
 def preprocess_html(html):
@@ -1287,7 +1275,7 @@ async def extract_video_sources(html, base_url, power_scraping):
         if src and ("player" in src or "embed" in src):
             iframe_url = urljoin(base_url, str(src))
             try:
-                iframe_html, _ = await fetch_rendered_html_playwright(
+                iframe_html, _, _ = await fetch_rendered_html_playwright(
                     iframe_url, power_scraping
                 )
                 nested_sources = await extract_video_sources(
@@ -1391,7 +1379,9 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     if not is_valid_link(url):
         return None
 
-    html, intercepted_links = await fetch_rendered_html_playwright(url)
+    html, intercepted_links, duration_fallback = await fetch_rendered_html_playwright(
+        url
+    )
     video_links = intercepted_links
     html = preprocess_html(html)
     if not html or not html.strip():
@@ -1418,7 +1408,7 @@ async def extract_video_metadata(url, query_embed, power_scraping):
 
         async def try_fetch_deep_link(deep_url):
             try:
-                deep_html, _ = await fetch_rendered_html_playwright(
+                deep_html, _, _ = await fetch_rendered_html_playwright(
                     deep_url, power_scraping=power_scraping
                 )
                 if not deep_html or re.search(
@@ -1508,37 +1498,46 @@ async def extract_video_metadata(url, query_embed, power_scraping):
     seen_video_urls = set()
     fallback_log_tracker = defaultdict(list)
 
-    async def get_metadata_for(video_url):
-        if video_url in seen_video_urls:
-            return None
-        seen_video_urls.add(video_url)
+    async def get_metadata_for(video_url: str) -> dict:
+        parsed = urlparse(video_url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+
+        if any(skip in video_url for skip in ["playlist.m3u8", ".ts", ".m3u8"]):
+            logging.debug(f"SKIP VIDEO: M3U8/TS {video_url}")
+            return {}
+
+        is_stream = video_url.endswith(".m3u8")
+
+        duration = 0.0
+        resolution_score = 0
 
         try:
-            duration = await asyncio.wait_for(
-                get_video_duration(video_url, html),
-                timeout=60 if power_scraping else 30,
-            )
+            if duration_fallback and isinstance(duration_fallback, dict):
+                duration = float(duration_fallback.get("duration", 0.0))
+                width = int(duration_fallback.get("width", 0))
+                height = int(duration_fallback.get("height", 0))
+                resolution_score = width * height
         except Exception as e:
-            logging.warning(f"DURATION FAIL - {video_url}: {e}")
-            duration = 0.0
-
-        is_stream = "m3u8" in video_url
+            logging.warning(
+                f"[DURATION FALLBACK] Failed to get duration/resolution for {video_url}: {e}"
+            )
 
         if duration == 0.0:
             duration = 60.0 if is_stream else 30.0
-            parsed = urlparse(video_url)
-            base = f"{parsed.scheme}://{parsed.netloc}"
             fallback_log_tracker[base].append(video_url)
-            score_boost = 0.2 if is_stream else 0.1
-        else:
-            score_boost = 0.0
 
-        if video_url.startswith("blob:"):
-            logging.debug(f"Skipping blob URL: {video_url}")
-            return None
+        if duration < 10:
+            logging.debug(f"VIDEO TOO SHORT - {video_url} - {duration:.1f}s")
+            return {}
 
-        if not tags:
-            logging.warning(f"Accepting video with no tags: {video_url}")
+        if video_url in seen_video_urls:
+            logging.debug(f"SKIP (dupe): {video_url}")
+            return {}
+
+        seen_video_urls.add(video_url)
+
+        score_boost = 0.2 if is_stream else 0.15
+        score = score_boost
 
         title = (
             meta["title"]
@@ -1552,8 +1551,9 @@ async def extract_video_metadata(url, query_embed, power_scraping):
             "title": title,
             "tags": tags,
             "duration": f"{duration:.2f}",
-            "score": score_boost,
+            "score": score,
             "is_stream": is_stream,
+            "resolution_score": resolution_score,
         }
 
     tasks = [get_metadata_for(url) for url in video_links]
