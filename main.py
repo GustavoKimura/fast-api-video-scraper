@@ -1749,7 +1749,7 @@ async def search(query: str = "", power_scraping: bool = False):
     start_time = time.monotonic()
 
     logging.info("=== STARTING SEARCH ===")
-    MINIMUM_VIDEOS_TO_RETURN = 10
+    MINIMUM_VIDEOS_TO_RETURN = 5
     videos_to_return = (
         min((os.cpu_count() or 4) * 10, 500)
         if power_scraping
