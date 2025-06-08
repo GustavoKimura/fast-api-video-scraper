@@ -342,7 +342,10 @@ def rank_by_similarity(results, query, min_duration=5, max_duration=3600):
         base_score = 0.0
 
         if query in combined_text:
-            base_score += 1.0
+            query_vec = model_embed.encode_cached(query)
+            text_vec = model_embed.encode_cached(combined_text)
+            semantic_sim = cosine_sim(query_vec, text_vec)
+            base_score += semantic_sim
         else:
             for word in query.split():
                 if word in combined_text:
@@ -1111,11 +1114,39 @@ async def auto_bypass_consent_dialog(page):
         for text in click_texts:
             try:
                 element = await page.query_selector(f"text={text}")
-                if element and await element.is_visible():
+                if not element or not await element.is_visible():
+                    continue
+
+                try:
+                    await element.scroll_into_view_if_needed()
                     await element.click(force=True)
-                    await page.wait_for_timeout(200)
-            except Exception as e:
-                logging.debug(f"CLICK FAIL: {text} -> {e}")
+                    logging.debug(f"[CLICK] ✅ Scroll + Force succeeded for: {text}")
+                    continue
+                except Exception as e1:
+                    logging.debug(
+                        f"[CLICK] ❌ Scroll + Force failed for '{text}': {e1}"
+                    )
+
+                try:
+                    box = await element.bounding_box()
+                    if box:
+                        x = box["x"] + box["width"] / 2
+                        y = box["y"] + box["height"] / 2
+                        await page.mouse.move(x, y)
+                        await page.mouse.click(x, y)
+                        logging.debug(f"[CLICK] ✅ Mouse click succeeded for: {text}")
+                        continue
+                except Exception as e2:
+                    logging.debug(f"[CLICK] ❌ Mouse click failed for '{text}': {e2}")
+
+                try:
+                    await page.evaluate("(el) => el.click()", element)
+                    logging.debug(f"[CLICK] ✅ JS eval click succeeded for: {text}")
+                except Exception as e3:
+                    logging.debug(f"[CLICK] ❌ JS eval click failed for '{text}': {e3}")
+
+            except Exception as outer_e:
+                logging.debug(f"[CLICK] ❌ Outer failure on '{text}': {outer_e}")
 
         await page.evaluate(
             """
