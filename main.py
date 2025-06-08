@@ -10,7 +10,7 @@ from langdetect import DetectorFactory, detect
 from deep_translator import GoogleTranslator
 from aiohttp import ClientTimeout, ClientSession
 from keybert import KeyBERT
-from playwright.async_api import Browser, BrowserContext
+from playwright.async_api import async_playwright, Browser, BrowserContext
 from boilerpy3 import extractors
 from numpy import dot, ndarray, zeros
 from numpy.linalg import norm
@@ -115,6 +115,15 @@ _browser_lock = asyncio.Lock()
 async def init_browser():
     global _playwright_browser, _playwright_context, _playwright_obj
 
+    if _playwright_obj is None:
+        for attempt in range(2):
+            try:
+                _playwright_obj = await async_playwright().start()
+                break
+            except Exception as e:
+                logging.error(f"PLAYWRIGHT INIT ERROR (attempt {attempt + 1}): {e}")
+                await asyncio.sleep(1)
+
     if _playwright_browser and not _playwright_browser.is_connected():
         try:
             await _playwright_browser.close()
@@ -125,9 +134,9 @@ async def init_browser():
 
     async with _browser_lock:
         if _playwright_browser is None or _playwright_context is None:
-            from playwright.async_api import async_playwright
+            if _playwright_obj is None:
+                raise RuntimeError("Playwright failed to start after retries.")
 
-            _playwright_obj = await async_playwright().start()
             _playwright_browser = await _playwright_obj.chromium.launch(
                 headless=True,
                 args=[
@@ -322,7 +331,7 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             sim = cosine_sim(query_embed, tag_embed)
             result_tags = normalize_tags(r.get("tags", []))
             if not result_tags:
-                continue
+                result_tags = normalize_tags(r.get("title", "").split())
             query_tags_norm = normalize_tags(list(query_tags))
             overlap = len(query_tags_norm & result_tags)
             boost = sum(tag_boosts.get(normalize_tag(tag), 0) for tag in r["tags"])
@@ -355,10 +364,11 @@ def rank_by_similarity(results, query, min_duration=30, max_duration=3600):
             f"SCORE DEBUG - {r['score']:.4f} | {r.get('url', '')[:50]} | Tags: {r.get('tags', [])}"
         )
 
-    if not final:
+    if not final or all(r.get("score", 0.0) == 0.0 for r in final):
         logging.warning(
-            "RANKING - No videos scored above 0. All videos may have failed metadata or tag generation."
+            "RANKING - No videos scored above 0. Using fallback sort by duration."
         )
+        final.sort(key=lambda x: float(x.get("duration", 0)), reverse=True)
 
     return sorted(final, key=lambda x: x["score"], reverse=True)
 
@@ -922,10 +932,18 @@ async def fetch_rendered_html_playwright(
 
         finally:
             try:
-                if page and not page.is_closed():
-                    await page.close()
+                if page:
+                    try:
+                        await page.close()
+                    except Exception as e:
+                        logging.warning(f"Failed to close page: {e}")
+                if context:
+                    try:
+                        await context.clear_cookies()
+                    except Exception as e:
+                        logging.warning(f"Failed to clear cookies: {e}")
             except Exception as e:
-                logging.warning(f"SAFE PAGE CLOSE ERROR - {e}")
+                logging.warning(f"General cleanup error: {e}")
 
         if video_requests:
             logging.debug(
@@ -1041,6 +1059,16 @@ async def auto_bypass_consent_dialog(page):
 
     try:
         await page.keyboard.press("Enter")
+
+        await page.evaluate(
+            """() => {
+            document.querySelectorAll('*')
+                .forEach(el => { if (el.innerText?.includes('parental control') || el.className?.includes('dialog')) {
+                    try { el.remove(); } catch (_) {}
+                }});
+        }"""
+        )
+
         await page.wait_for_timeout(500)
     except Exception:
         pass
@@ -1392,7 +1420,10 @@ async def extract_video_metadata(url, query_embed, power_scraping):
                 )
                 duration = 60.0
             else:
-                logging.warning(f"No valid duration found for {video_url}")
+                logging.warning(
+                    f"No valid duration found for {video_url}, defaulting to 30s"
+                )
+                duration = 30.0
         if is_stream:
             logging.info(f"Stream detected (m3u8): {video_url}")
 
