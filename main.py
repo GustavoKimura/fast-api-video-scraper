@@ -14,7 +14,7 @@ from playwright.async_api import Browser, BrowserContext
 from boilerpy3 import extractors
 from numpy import dot, ndarray, zeros
 from numpy.linalg import norm
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, OrderedDict
 from typing import List, Tuple, Callable
 from itertools import combinations
 from difflib import SequenceMatcher
@@ -115,7 +115,11 @@ _browser_lock = asyncio.Lock()
 async def init_browser():
     global _playwright_browser, _playwright_context, _playwright_obj
 
-    if not _playwright_browser or not _playwright_browser.is_connected():
+    if _playwright_browser and not _playwright_browser.is_connected():
+        try:
+            await _playwright_browser.close()
+        except:
+            pass
         _playwright_browser = None
         _playwright_context = None
 
@@ -208,6 +212,7 @@ class OpenCLIPEmbedder:
         model_name: str = "ViT-B-32",
         pretrained: str = "laion2b_s34b_b79k",
         device: str | None = None,
+        max_cache_size: int = 5000,
     ):
         self.device: str = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model, _, _ = open_clip.create_model_and_transforms(
@@ -217,13 +222,17 @@ class OpenCLIPEmbedder:
         self.tokenizer: Callable[[str], torch.Tensor] = open_clip.get_tokenizer(
             model_name
         )
-        self._cache: dict[str, ndarray] = {}
-        self._cache_lock = Lock()
 
-    def encode_cached(self, text: str):
+        self._cache: OrderedDict[str, ndarray] = OrderedDict()
+        self._cache_lock = Lock()
+        self._max_cache_size = max_cache_size
+
+    def encode_cached(self, text: str) -> ndarray:
         with self._cache_lock:
             if text in self._cache:
+                self._cache.move_to_end(text)
                 return self._cache[text]
+
         try:
             tokens = self.tokenizer(text).to(self.device)
             with torch.no_grad():
@@ -232,8 +241,13 @@ class OpenCLIPEmbedder:
         except Exception as e:
             logging.error(f"EMBED ERROR - Failed to encode '{text}': {e}")
             result = zeros((512,))
+
         with self._cache_lock:
             self._cache[text] = result
+            self._cache.move_to_end(text)
+            if len(self._cache) > self._max_cache_size:
+                self._cache.popitem(last=False)
+
         return result
 
 
@@ -680,11 +694,39 @@ async def fetch_rendered_html_playwright(
         timeout = 900000
 
     context = await init_browser()
+    video_requests = []
+
+    async def intercept_video_requests(route):
+        try:
+            req_url = route.request.url
+            if any(
+                ext in req_url.lower()
+                for ext in [
+                    ".mp4",
+                    ".webm",
+                    ".m3u8",
+                    ".ts",
+                    ".mov",
+                    ".mpd",
+                    "/get_file/",
+                    "/download/",
+                    "/hls/",
+                    "/flv/",
+                ]
+            ):
+                if req_url not in video_requests:
+                    logging.debug(f"INTERCEPT - Video URL: {req_url}")
+                    video_requests.append(req_url)
+            await route.continue_()
+        except Exception as e:
+            if "closed" not in str(e):
+                logging.warning(f"INTERCEPT ERROR - {e}")
+
+    await context.route("**/*", intercept_video_requests)
 
     async def _internal_fetch_with_playwright(url, timeout):
         html = ""
         page = None
-        video_requests = []
 
         async def safe_evaluate(page, script, arg=None):
             try:
@@ -699,35 +741,12 @@ async def fetch_rendered_html_playwright(
                 logging.error(f"SAFE EVAL ERROR - {e}")
                 return None
 
-        async def intercept_video_requests(route):
-            try:
-                req_url = route.request.url
-                if any(
-                    ext in req_url.lower()
-                    for ext in [
-                        ".mp4",
-                        ".webm",
-                        ".m3u8",
-                        ".ts",
-                        ".mov",
-                        ".mpd",
-                        "/get_file/",
-                        "/download/",
-                        "/hls/",
-                        "/flv/",
-                    ]
-                ):
-                    if req_url not in video_requests:
-                        logging.debug(f"INTERCEPT - Video URL: {req_url}")
-                        video_requests.append(req_url)
-                await route.continue_()
-            except Exception as e:
-                if "closed" not in str(e):
-                    logging.warning(f"INTERCEPT ERROR - {e}")
-
         try:
-            await context.route("**/*", intercept_video_requests)
-            page = await context.new_page()
+            try:
+                page = await context.new_page()
+            except Exception as e:
+                logging.error(f"Failed to create new page: {e}")
+                return "", []
 
             async def handle_stream_response(response):
                 try:
@@ -798,6 +817,10 @@ async def fetch_rendered_html_playwright(
                     )
                 except Exception as e:
                     logging.debug(f"No video/player selectors found during wait: {e}")
+
+                if not page or page.is_closed():
+                    logging.warning("Page is not available or already closed.")
+                    return "", []
 
                 html = await page.content()
 
@@ -870,49 +893,76 @@ async def fetch_rendered_html_playwright(
             await safe_evaluate(
                 page,
                 """() => {
-                    const blockers = document.querySelectorAll('[class*="overlay"], [class*="modal"], [id*="age"], .dialog-desktop-container');
+                    const selectors = [
+                        '[class*="overlay"]',
+                        '[class*="modal"]',
+                        '[id*="age"]',
+                        '[id*="consent"]',
+                        '[class*="consent"]',
+                        '.dialog-desktop-container',
+                        'div[role="dialog"]',
+                        '.vjs-modal-dialog'
+                    ];
+                    const blockers = document.querySelectorAll(selectors.join(','));
                     blockers.forEach(el => {
                         el.style.display = 'none';
                         el.style.pointerEvents = 'none';
                         el.style.visibility = 'hidden';
-                        el.remove?.();
+                        try { el.remove(); } catch (_) {}
                     });
                 }""",
             )
 
-            content = extract_content(html)
+            try:
+                content = extract_content(html)
+            except Exception as e:
+                logging.warning(f"CONTENT EXTRACT FAIL - {e}")
+                content = ""
             del html
 
         finally:
-            await context.unroute("**/*")
-
             try:
-                try:
-                    if page and not page.is_closed():
-                        await page.close()
-                except Exception as e:
-                    logging.warning(f"SAFE PAGE CLOSE ERROR - {e}")
+                if page and not page.is_closed():
+                    await page.close()
             except Exception as e:
-                logging.error(f"PAGE CLOSE ERROR - {e}")
+                logging.warning(f"SAFE PAGE CLOSE ERROR - {e}")
 
         if video_requests:
             logging.debug(
                 f"STREAM RESPONSE - {len(set(video_requests))} stream(s) from {url}"
             )
 
+        if (
+            page is not None
+            and not page.is_closed()
+            and (not content or not content.strip())
+        ):
+            try:
+                os.makedirs("screenshots", exist_ok=True)
+                await page.screenshot(
+                    path=f"screenshots/timeout_debug_{int(time.time())}.png",
+                    full_page=True,
+                )
+                logging.warning(f"Saved debug screenshot for {url}")
+            except Exception as e:
+                logging.warning(f"Screenshot capture failed: {e}")
+
         return content, [v for v in set(video_requests) if not v.startswith("blob:")]
 
-    for attempt in range(retries + 1):
-        try:
-            html, video_urls = await _internal_fetch_with_playwright(
-                url, timeout + attempt * 15000
-            )
-            if html and html.strip():
-                return html, video_urls
-        except Exception as e:
-            logging.warning(f"RETRY {attempt} - Error fetching {url}: {e}")
-        finally:
-            await asyncio.sleep(2 * (attempt + 1))
+    try:
+        for attempt in range(retries + 1):
+            try:
+                html, video_urls = await _internal_fetch_with_playwright(
+                    url, timeout + attempt * 15000
+                )
+                if html and html.strip():
+                    return html, video_urls
+            except Exception as e:
+                logging.warning(f"RETRY {attempt} - Error fetching {url}: {e}")
+            finally:
+                await asyncio.sleep(2 * (attempt + 1))
+    finally:
+        await context.unroute("**/*")
 
     return "", []
 
@@ -1155,6 +1205,12 @@ async def extract_video_sources(html, base_url, power_scraping):
                 group,
             )
             sources.update(nested_files)
+
+    if not sources:
+        matches = re.findall(r'(https?://[^\s\'"]+\.(mp4|webm|m3u8|mov))', html)
+        if matches:
+            for match in matches:
+                sources.add(match[0])
 
     meta_tags = [
         ("property", "og:video"),
@@ -1464,7 +1520,7 @@ async def search_videos_async(
                 try:
                     result = await asyncio.wait_for(
                         extract_video_metadata(url, query_embed, power_scraping),
-                        timeout=45 if not power_scraping else 90,
+                        timeout=60 if not power_scraping else 120,
                     )
                 except asyncio.TimeoutError:
                     logging.warning(
@@ -1634,6 +1690,9 @@ async def lifespan(_: FastAPI):
         await flush_task
     except asyncio.CancelledError:
         pass
+
+    if client_session:
+        await client_session.close()
 
     if _playwright_context:
         await _playwright_context.close()
