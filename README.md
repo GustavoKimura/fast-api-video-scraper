@@ -32,8 +32,8 @@ A high-performance API for searching, extracting, and semantically ranking video
 First, clone the repository and set up your Python environment:
 
 ```
-git clone https://github.com/yourusername/video-semantic-search.git
-cd video-semantic-search
+git clone https://github.com/GustavoKimura/fast-api-video-scraper.git
+cd fast-api-video-scraper
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
