@@ -128,4 +128,3 @@ MIT © Kimura Dev
 ---
 
 > This project was engineered following best practices, delivering efficient natural language-based video search and multimodal analysis. Contributions are welcome!
-```
